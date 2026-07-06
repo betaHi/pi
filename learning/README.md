@@ -46,10 +46,11 @@
 | 04 | Tool 系统 | 从 tool call 到本地执行、结果回传，中间有哪些工程边界？ | `agent-loop.ts`、`core/tools/*` |
 | 05 | Session 系统 | 对话怎么存、恢复、分支？为什么是 append-only entry 树而不是 messages 数组？ | `session-manager.ts`、compaction、`buildSessionContext` |
 | 06 | Context 构建 | 发给模型的输入怎么拼出来、怎么裁剪？为什么不只是 messages？ | `system-prompt.ts`、`transformContext`、`convertToLlm` |
-| 07 | Skills 与 Extension | reusable instruction、slash command、hook、tool 如何进入生命周期？ | `skills.ts`、`resource-loader.ts`、`extensions/*` |
-| 08 | Memory 系统 | 长期记忆如何提取、存储、检索、注入？pi 提供了什么，应用层还要补什么？ | session events、context hook、external store |
-| 09 | 自我进化 | agent 如何从反馈中更新规则、skills 或工具策略，并避免污染长期上下文？ | memory、skills、extension hooks、eval loop |
-| 10 | Pi 应用与归一化入口 | 怎么 build 一个 UI bot 或 CLI，把工作流归一化到一个 agent 入口？ | SDK/RPC/Web UI/examples、前 9 篇总结 |
+| 07 | Skills 系统 | reusable instruction 怎么被发现、暴露、按需加载？为什么只把描述放进 prompt、正文靠 read 取？ | `skills.ts`、`formatSkillsForPrompt`、`resource-loader.ts` |
+| 08 | Extension 系统 | tool、slash command、hook 如何进入 agent 生命周期？extension 能在哪些时机介入？ | `extensions/*`、`ExtensionRunner`、事件生命周期 |
+| 09 | Memory 系统 | 长期记忆如何提取、存储、检索、注入？pi 提供了什么，应用层还要补什么？ | session events、context hook、external store |
+| 10 | 自我进化 | agent 如何从反馈中更新规则、skills 或工具策略，并避免污染长期上下文？ | memory、skills、extension hooks、eval loop |
+| 11 | Pi 应用与归一化入口 | 怎么 build 一个 UI bot 或 CLI，把工作流归一化到一个 agent 入口？ | SDK/RPC/Web UI/examples、前 10 篇总结 |
 
 每篇文章固定控制在一个问题、一张图、一条调用链、三到五个源码证据、一个工程启发。能帮助读者成为 agent 工程师的机制要讲透；API 细节和文件清单放回学习材料。内部学习路线也按工程问题组织，避免重新退回“按包读源码”。
 
