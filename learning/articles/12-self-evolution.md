@@ -54,7 +54,7 @@ placeholder
 
 README 特别强调"避免污染长期上下文"。pi 有几个设计正好对上这个要求。
 
-**`custom` entry 不进上下文**：进化系统的内部状态用它存，投影时被忽略，模型看不到——状态留痕，但不占 token、不干扰对话。这里要和 memory 篇的 `custom_message` 区分开：`custom_message` 是进上下文的，`custom`（不带 message）是不进的，一字之差、方向相反。
+**`custom` entry 不进上下文**：进化系统的内部状态用它存，投影时被忽略，模型看不到——状态留痕，但不占 token、不干扰对话。这里要和 memory 篇的 `custom_message` entry 区分开：两者都是 session 树上的节点，但 `custom_message` entry 会被投影进上下文，`custom` entry 不会。一个用来注入内容给模型看，一个用来存状态给应用层自己用。
 
 **append-only 树天然可回溯**：Session 篇讲过，什么都不删。进化改了什么、基于什么状态改的，都在树里留痕，天然支持回看历史、回滚到某个点。
 

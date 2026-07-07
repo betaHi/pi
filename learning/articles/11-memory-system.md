@@ -48,7 +48,7 @@ pi 自带的示例里有 extension 用 `context` 事件改上下文（虽然那�
 用它注入记忆的特点：
 
 - **持久**：进 session 树、留痕、随会话恢复（Session 篇的 append-only 树）；
-- 投影时会被翻成一条 user 消息（Context 篇讲过 `convertToLlm` 的映射）；
+- 投影时进入上下文：`custom_message` entry 先被投影成一条消息，再由 `convertToLlm` 翻成 user 消息（Context 篇讲过这个映射，那里表格里的 `custom` 指的就是这一步的消息角色，注意和这里的 `custom_message` entry 是两个层级）；
 - 适合"记住这条，之后每次都带上"——稳定的长期上下文。
 
 两条路对照：
