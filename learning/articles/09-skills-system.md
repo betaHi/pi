@@ -153,16 +153,16 @@ skill 系统处理的是发现、索引和按需加载。几个边界需要分�
 
 ```text
 DefaultPackageManager.resolve()
-        -> 汇总 packages / settings / 自动发现 / CLI 资源
+  -> 汇总 packages / settings / 自动发现 / CLI 资源
 DefaultResourceLoader.reload()
-        -> loadSkills(skillPaths, includeDefaults=false)
-        -> loadSkillFromFile(frontmatter 校验 + SourceInfo)
+  -> loadSkills(skillPaths, includeDefaults=false)
+  -> loadSkillFromFile(frontmatter 校验 + SourceInfo)
 AgentSession._rebuildSystemPrompt()
-        -> buildSystemPrompt(... skills ...)
-        -> formatSkillsForPrompt(name + description + location)
+  -> buildSystemPrompt(... skills ...)
+  -> formatSkillsForPrompt(name + description + location)
 运行时
-        -> 模型按描述 read SKILL.md
-        -> 用户 /skill:name 强制展开正文
+  -> 模型按描述 read SKILL.md
+  -> 用户 /skill:name 强制展开正文
 ```
 
 skill 系统的价值在于把可复用指令整理成可发现的资源。常驻上下文里只放索引，细节留在文件里；需要时再读，用户也可以明确点名。这种拆法让 agent 可以带着一组可复用工作方法运行，同时把上下文成本控制在可管理范围内。

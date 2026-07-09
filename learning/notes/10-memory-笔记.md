@@ -6,13 +6,13 @@
 
 ---
 
-## 题眼：session 持久化不是长期记忆
+## 题眼：session 持久化和长期记忆是两层问题
 
-pi 会把会话保存成 append-only session tree，这能恢复对话历史。但这不等于长期 memory。
+pi 会把会话保存成 append-only session tree，这能恢复对话历史。长期 memory 还需要额外的抽取、检索和治理策略。
 
-长期 memory 至少要回答几个问题：什么值得记、存在哪里、怎么检索、何时注入、过期和冲突怎么处理。当前源码没有专门的 embedding、向量库、记忆抽取器、去重器或长期记忆策略模块。出现的 `InMemory*` 主要是内存存储/测试用实现，不是“用户长期记忆”。
+长期 memory 至少要回答几个问题：什么值得记、存在哪里、怎么检索、何时注入、过期和冲突怎么处理。当前源码没有专门的 embedding、向量库、记忆抽取器、去重器或长期记忆策略模块。出现的 `InMemory*` 主要是内存存储/测试用实现，和“用户长期记忆”属于不同层次。
 
-所以这一篇的重点不是找一个叫 memory 的模块，而是看 pi 给了哪些能承载 memory 的接口。
+所以这一篇重点看 pi 给了哪些能承载 memory 的接口。
 
 ---
 
@@ -76,7 +76,7 @@ agent 准备 LLM context
 
 ## 四、状态路径：`appendEntry`，不进 LLM context
 
-`appendEntry` 最终写的是 `custom` entry，不是 `custom_message` entry。两者差一词，语义不同：
+`appendEntry` 最终写的是 `custom` entry；`custom_message` entry 是另一类会进入上下文的消息。两者差一词，语义不同：
 
 | entry | 是否进 LLM context | 用途 |
 |---|---|---|
@@ -93,13 +93,13 @@ memory 系统可以用 `appendEntry` 记录内部状态，例如：最后一次�
 
 这适合放项目规则、团队约定、固定偏好。不适合频繁写入的动态 memory，因为它没有抽取、去重、冲突处理，也会长期占据 system prompt。
 
-extension 还可以在 `resources_discover` 返回 skill/prompt/theme 路径。对 memory 来说，这可以做“静态化后的记忆包”：例如把稳定规则整理成 prompt 或 skill，再通过 reload 纳入资源。但这仍然是应用层策略，不是 pi 自动记忆。
+extension 还可以在 `resources_discover` 返回 skill/prompt/theme 路径。对 memory 来说，这可以做“静态化后的记忆包”：例如把稳定规则整理成 prompt 或 skill，再通过 reload 纳入资源。这仍然属于应用层策略。
 
 ---
 
 ## 六、一个可落地的 memory 设计
 
-下面是基于 pi 原语可以搭出来的结构，属于应用层设计，不是源码内置功能。
+下面是基于 pi 原语可以搭出来的结构，属于应用层设计。
 
 ```text
 提取：extension 监听 turn_end/message_end
@@ -131,4 +131,4 @@ extension 还可以在 `resources_discover` 返回 skill/prompt/theme 路径。�
 
 ## 一句话总结
 
-pi 给 memory 提供的是接入点，不是完整记忆系统。瞬态相关记忆用 `context` hook，持久会话消息用 `custom_message`，extension 内部状态用 `custom` entry，稳定项目规则用 project context 或资源。抽取、检索、去重、作用域和治理都要应用层自己实现。
+pi 给 memory 提供的是接入点。瞬态相关记忆用 `context` hook，持久会话消息用 `custom_message`，extension 内部状态用 `custom` entry，稳定项目规则用 project context 或资源。抽取、检索、去重、作用域和治理都要应用层自己实现。

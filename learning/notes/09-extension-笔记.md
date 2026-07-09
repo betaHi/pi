@@ -8,7 +8,7 @@
 
 ## 题眼：extension 是应用层介入点
 
-前面几篇看到过 context hook、tool hook、custom message、resource discovery。它们不是零散功能，而是 extension 体系的不同入口。
+前面几篇看到过 context hook、tool hook、custom message、resource discovery。它们都可以放进 extension 体系里理解。
 
 一个 extension 的基本形态：
 
@@ -56,7 +56,7 @@ handler 的 `ctx` 提供 `ui`、`cwd`、`sessionManager`、`modelRegistry`、`mo
 
 ## 二、事件生命周期和返回值规则
 
-事件不是都一样。要看 runner 怎么处理返回值。
+不同事件的返回值规则不同，要看 runner 怎么处理。
 
 | 事件 | 时机 | 返回值行为 |
 |---|---|---|
@@ -116,7 +116,7 @@ extension 用 `pi.registerCommand(name, { handler })` 注册命令。用户输�
 - 同名命令会生成去重后的 invocation name，例如 `foo`、`foo:2`。
 - handler 返回 `Promise<void>`，效果通过 ctx、UI、session 操作或 `pi.sendMessage` 体现。
 
-skills 和 prompt templates 也会出现在 slash command 补全里，但它们不是 extension command：skill 的执行在 `_expandSkillCommand`，prompt template 的执行在 `expandPromptTemplate`。
+skills 和 prompt templates 也会出现在 slash command 补全里，但它们走各自的执行路径：skill 在 `_expandSkillCommand`，prompt template 在 `expandPromptTemplate`。
 
 ---
 
@@ -167,4 +167,4 @@ AgentSession._buildRuntime()
 
 ## 一句话总结
 
-extension 是 pi 暴露应用层策略的总接口。它不是独立 agent，而是把工具、命令、资源发现、上下文改写、请求审计、权限拦截和 UI 交互挂到同一个 AgentSession 生命周期上。
+extension 是 pi 暴露应用层策略的总接口。它把工具、命令、资源发现、上下文改写、请求审计、权限拦截和 UI 交互挂到同一个 AgentSession 生命周期上。

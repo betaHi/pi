@@ -46,7 +46,7 @@ state = {
 
 `tools` 和 `messages` 有 getter/setter，赋值时会拷贝顶层数组。coding-agent 恢复会话时，就是把已有 session messages 放回 `agent.state.messages`。
 
-还有一些控制字段不在 `state` 对象里，比如 `activeRun`、steering 队列和 follow-up 队列。它们是 Agent 实例的私有字段。换句话说，`state` 是 Agent 对外暴露的主要状态，不是这个对象内部所有字段的完整列表。
+还有一些控制字段不在 `state` 对象里，比如 `activeRun`、steering 队列和 follow-up 队列。它们是 Agent 实例的私有字段。换句话说，`state` 是 Agent 对外暴露的主要状态，内部还另有队列、监听者和运行控制字段。
 
 把创建一个 Agent 时实际持有的东西列全，是这几类：`state`（对话状态，唯一对外暴露的）、两个消息队列（steering 和 follow-up）、事件监听者集合、一组可注入的回调（`convertToLlm`、`transformContext`、`streamFn`、`getApiKey`、`beforeToolCall` 等），以及传输和运行配置（`sessionId`、`transport`、`toolExecution` 等）。所以创建一个 Agent，就是在内存里创建一个把这些打包在一起的对象。它不连数据库、不起服务、不占端口，也不内置应用级鉴权、存储、skill、extension 系统——这些是 AgentSession 或其他外层应用装的。
 
@@ -59,7 +59,7 @@ Agent 的方法可以按用途分成四组。
 ### 启动一轮
 
 - `prompt(input)`：从文本、单条消息或一批消息开始一轮。已有 active run 时会抛错。
-- `continue()`：从当前 transcript 继续跑。最后一条不是 user 或 `toolResult` 时会抛错；如果最后是 assistant，它会先检查 steering/follow-up 队列。
+- `continue()`：从当前 transcript 继续跑。最后一条需要是 user 或 `toolResult`；如果最后是 assistant，它会先检查 steering/follow-up 队列。
 
 ### 排队
 
@@ -145,7 +145,7 @@ coding-agent 的 `createAgentSession` 就是外层装配的例子：
 | Provider 请求 | `streamFn`、`getApiKey`、`onPayload`、`onResponse`、`transport`、`sessionId`、`thinkingBudgets` | 控制请求如何发、key 如何取、payload/response 如何观察 |
 | 工具执行 | `beforeToolCall`、`afterToolCall`、`toolExecution` | 拦截工具、改工具结果、选择 parallel/sequential 策略 |
 | 下一轮准备 | `prepareNextTurn` | turn 结束后、下一次 provider 请求前，替换 context/model/thinkingLevel |
-| 队列语义 | `steeringMode`、`followUpMode` | 控制 steering/follow-up 一次 drain 一条还是全部 drain |
+| 队列语义 | `steeringMode`、`followUpMode` | 控制 steering/follow-up 一次 drain 一条或 drain 所有队列项 |
 
 这里有个小边界：底层 loop 的 `prepareNextTurn` 会拿到 turn context；`AgentOptions.prepareNextTurn` 这一层当前只接收 signal。也就是说，直接用 `new Agent` 时，这个 hook 更适合做不依赖上一轮细节的下一轮准备。要基于 `message`、`toolResults` 或完整 context 做判断，需要看更低层 loop 或外层 harness 的接法。
 
@@ -182,11 +182,87 @@ core Agent 保持轻，是因为它只关心对话如何跑。存储、资源发
 
 实现链路大致是这样：extension 加载时注册 `subagent` 工具；模型调用这个工具时，工具先按 scope 发现 agent 定义，再把选中的 agent system prompt 写入临时文件，最后启动独立 `pi --mode json -p --no-session ...` 子进程。父进程读取子进程 stdout 里的 JSON 事件，收集 assistant 消息、工具结果、usage、stopReason，再把最终输出作为 `subagent` 工具结果返回给父 agent。
 
-这里的“子 agent”不是当前 `Agent` 实例内部创建的对象。它是一个独立的 `pi` 子进程，有自己的上下文窗口、模型参数、工具配置和输出流。父 agent 不直接共享它的 transcript，只收到工具结果和 details。
+这里的“子 agent”指独立的 `pi` 子进程，有自己的上下文窗口、模型参数、工具配置和输出流。父 agent 不直接共享它的 transcript，只收到工具结果和 details。
 
-这个示例支持 single、parallel、chain 三种模式。single 是一个 agent 做一个任务；parallel 是多个 agent 并行处理多个任务，代码里限制最多 8 个任务、4 个并发；chain 是按顺序跑多个 agent，后一步可以引用前一步输出。parallel 返回给父模型的每个任务输出有 50 KB 上限，完整结果保留在 tool details。
+这个示例支持 single、parallel、chain 三种模式。三种模式共用同一个 `runSingleAgent` 执行单元，差别在父工具怎样组织多个子进程。
 
-它还定义了自己的 agent 配置文件。agent 是 markdown 文件，frontmatter 里有 `name`、`description`，可选 `tools` 和 `model`，正文作为子进程的附加 system prompt。用户级 agent 放在 `~/.pi/agent/agents/*.md`，项目级 agent 放在 `.pi/agents/*.md`。项目级 agent 涉及仓库控制的 prompt，示例里默认不加载，需要显式 scope，并在交互模式下确认。示例自带 `scout`、`planner`、`reviewer`、`worker` 几个 agent 定义，它们是配置文件，不是 core 里的新类。
+### single：一个 agent 处理一个 task
+
+single 可以用一个具体例子理解。父模型调用 `subagent` 工具时，参数可能是：
+
+```json
+{ "agent": "scout", "task": "Find where authentication is implemented" }
+```
+
+工具会去 agent 定义目录里找 `scout.md`。假设这份文件是：
+
+```markdown
+---
+name: scout
+description: Fast codebase recon
+tools: read, grep, find, ls, bash
+model: claude-haiku-4-5
+---
+You are a fast codebase scout. Return compact findings with file paths.
+```
+
+工具会把它翻译成一次子进程调用：
+
+```text
+pi --mode json -p --no-session \
+  --model claude-haiku-4-5 \
+  --tools read,grep,find,ls,bash \
+  --append-system-prompt /tmp/pi-subagent-xxx/prompt-scout.md \
+  "Task: Find where authentication is implemented"
+```
+
+临时 prompt 文件里放的是 `scout.md` 的正文。子进程运行时会自己构造上下文、调用工具、输出 JSON 事件。父进程不共享它的 transcript，只读取这些 JSON 事件并整理结果。
+
+父进程读取子进程 stdout 里的 JSON 事件，收集 assistant 消息、工具结果、usage 和 stopReason。子进程成功时，父工具返回最后一条 assistant 文本；失败时，返回 errorMessage、stderr 或最后输出。
+
+> 配图提示：画一个从父 agent 到 `subagent` 工具再到单个 `pi` 子进程的流程图。节点依次是：父模型调用 `subagent(agent, task)`、发现 agent markdown、写临时 system prompt、启动 `pi --mode json -p --no-session`、读取 JSON 事件、返回最终文本给父模型。重点标出“一个 task -> 一个子进程 -> 一个结果”。
+
+### parallel：多个 agent 并行处理多个 task
+
+parallel 的输入是一组任务，例如：
+
+```json
+{
+  "tasks": [
+    { "agent": "scout", "task": "Find model resolution code" },
+    { "agent": "scout", "task": "Find provider registration code" },
+    { "agent": "reviewer", "task": "Review auth-related code paths" }
+  ]
+}
+```
+
+每个 task 都会走 single 的执行路径，各自启动一个独立 `pi` 子进程。代码先检查任务数，最多 8 个；执行时用 `mapWithConcurrencyLimit` 控制并发，最多 4 个子进程同时运行。
+
+父工具会维护一个 `allResults` 数组。每个子进程有新消息时，对应位置会被更新，并通过 `onUpdate` 把进度发给 UI，例如“2/3 done, 1 running”。所有任务结束后，父工具把每个 task 的输出整理成小结返回给父模型。为了控制返回给父模型的上下文量，每个 task 的可见输出最多 50 KB；完整消息、stderr、usage 等保存在 tool details。
+
+> 配图提示：画一个父 agent 调用 `subagent` 后分叉成多个并行子进程的图。左边是父 agent，中间是 `subagent` 工具，右边并排 3 到 4 个 `pi` 子进程，标“最多 4 个并发 / 最多 8 个任务”。每个子进程箭头回到一个 `allResults` 汇总表，再汇成父模型可见的小结。旁边标“每个 task 返回给模型最多 50 KB，完整内容在 details”。
+
+### chain：多个 agent 按顺序接力
+
+chain 的输入是一条步骤列表，例如：
+
+```json
+{
+  "chain": [
+    { "agent": "scout", "task": "Find the read tool implementation" },
+    { "agent": "planner", "task": "Use these findings to propose a refactor plan:\n{previous}" },
+    { "agent": "worker", "task": "Implement the plan:\n{previous}" }
+  ]
+}
+```
+
+它一次只跑一个子进程。第一步 `scout` 完成后，代码取它的最终输出，存进 `previousOutput`。第二步 `planner` 的 task 里有 `{previous}`，执行前会替换成 scout 的输出。第三步同理，会拿到 planner 的输出。
+
+如果某一步失败，chain 会停止，返回失败发生在哪一步、哪个 agent 失败、失败输出是什么，并把已经完成的步骤放进 details。所有步骤成功时，父工具返回最后一步的最终输出。
+
+> 配图提示：画一个线性接力图：Step 1 `scout` 输出压缩上下文，箭头进入 Step 2 `planner` 的 `{previous}`，再进入 Step 3 `worker`。每一步下面画一个独立 `pi` 子进程小框。在线路旁标“成功 -> 输出传给下一步；失败 -> chain 停止并返回已完成 details”。
+
+它还定义了自己的 agent 配置文件。agent 是 markdown 文件，frontmatter 里有 `name`、`description`，可选 `tools` 和 `model`，正文作为子进程的附加 system prompt。用户级 agent 放在 `~/.pi/agent/agents/*.md`，项目级 agent 放在 `.pi/agents/*.md`。项目级 agent 涉及仓库控制的 prompt，示例里默认不加载，需要显式 scope，并在交互模式下确认。示例自带 `scout`、`planner`、`reviewer`、`worker` 几个 agent 定义，它们是配置文件，不属于 core 里的新类。
 
 所以更准确的说法是：pi core 没有把 subagent/multi-agent 做成内置运行模型；coding-agent 默认也没有启用 agent 工具；但 extension 机制可以实现这类编排，仓库里的 subagent 示例已经证明了这一点。
 
@@ -209,7 +285,7 @@ agent.prompt(input)
   -> finishRun 清理 activeRun 和运行时状态
 ```
 
-Agent 不是一个外部服务，它是对话运行对象。它把一段 transcript、当前模型、工具、队列和生命周期控制收在一起，再把实际 turn loop 交给 `runAgentLoop`。理解这一层之后，前面的 loop、context、tool，后面的 AgentSession 和应用入口，就能连成一条线。
+Agent 是对话运行对象。它把一段 transcript、当前模型、工具、队列和生命周期控制收在一起，再把实际 turn loop 交给 `runAgentLoop`。理解这一层之后，前面的 loop、context、tool，后面的 AgentSession 和应用入口，就能连成一条线。
 
 ---
 

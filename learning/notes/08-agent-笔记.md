@@ -140,7 +140,7 @@ this.getApiKey        = options.getApiKey;           // undefined
 | Provider 请求 | `streamFn`、`getApiKey`、`onPayload`、`onResponse`、`transport`、`sessionId`、`thinkingBudgets` | 控制如何发请求、如何取 key、如何观察 payload/response |
 | 工具执行 | `beforeToolCall`、`afterToolCall`、`toolExecution` | 拦截工具、改工具结果、选择 parallel/sequential 策略 |
 | 下一轮准备 | `prepareNextTurn` | turn 结束后、下一次 provider 请求前，替换 context/model/thinkingLevel |
-| 队列语义 | `steeringMode`、`followUpMode` | 控制队列一次 drain 一条还是全部 drain |
+| 队列语义 | `steeringMode`、`followUpMode` | 控制队列一次 drain 一条或 drain 所有队列项 |
 
 细节：底层 `AgentLoopConfig.prepareNextTurn` 会收到 turn context；`AgentOptions.prepareNextTurn` 这一层当前只接收 signal，Agent wrapper 不把 turn context 透给调用方。要基于 `message/toolResults/context` 做复杂决策，需要看更低层 loop 或外层 harness 怎么接。
 
@@ -187,7 +187,7 @@ core Agent 轻、coding-agent 装设施，好处（部分是顺着源码结构�
 
 coding-agent 默认内置工具是 read、bash、edit、write、grep、find、ls 这类本地工具。默认工具集中没有 Claude Code 那种直接派生子 agent 的 Agent/Task 工具。
 
-这说明 subagent 不是默认核心能力，也不是默认 active tool。
+这说明 subagent 属于扩展层能力，默认 active tools 里没有它。
 
 ### extension 示例层
 
@@ -208,16 +208,83 @@ extension 加载
   -> 把最终输出和 details 返回给父 agent
 ```
 
-这里的“子 agent”不是当前 `Agent` 实例内部 new 出来的对象。它是一个独立 `pi` 子进程，带自己的上下文窗口、模型配置、工具配置和输出流。父 agent 只看到 `subagent` 工具结果。
+这里的“子 agent”指独立 `pi` 子进程，而非当前 `Agent` 实例内部 new 出来的对象。它带自己的上下文窗口、模型配置、工具配置和输出流。父 agent 只看到 `subagent` 工具结果。
 
-这个示例支持三种模式：
-- single：一个 agent 处理一个 task。
-- parallel：多个 agent 并行跑多个 task，最多 8 个任务、4 个并发；并行结果返回给父模型时每个任务有 50 KB 上限，完整结果保存在 tool details。
-- chain：按顺序执行多个 agent，后一步可以使用前一步输出。
+这个示例支持三种模式。
+
+**single：一个 agent 处理一个 task**
+
+假设父模型调用工具时给了这段参数：
+
+```json
+{ "agent": "scout", "task": "Find where authentication is implemented" }
+```
+
+工具会先在 agent 定义里找 `scout`。如果 `scout.md` 里写了：
+
+```yaml
+---
+name: scout
+description: Fast codebase recon
+tools: read, grep, find, ls, bash
+model: claude-haiku-4-5
+---
+You are a fast codebase scout. Return compact findings with file paths.
+```
+
+工具会把这份定义翻译成一次子进程调用：
+
+```text
+pi --mode json -p --no-session \
+  --model claude-haiku-4-5 \
+  --tools read,grep,find,ls,bash \
+  --append-system-prompt /tmp/pi-subagent-xxx/prompt-scout.md \
+  "Task: Find where authentication is implemented"
+```
+
+`prompt-scout.md` 里放的是 `scout.md` 的正文。子进程运行时会自己选模型、构造上下文、调用工具。父进程不进入它的上下文，只读取它 stdout 里的 JSON 事件。
+
+父进程读取子进程 JSON 事件，收集 assistant 消息、工具结果、usage、stopReason。子进程成功时，返回最后一条 assistant 文本；失败时，返回 errorMessage、stderr 或最后输出。
+
+**parallel：多个 agent 并行处理多个 task**
+
+parallel 的输入像这样：
+
+```json
+{
+  "tasks": [
+    { "agent": "scout", "task": "Find model resolution code" },
+    { "agent": "scout", "task": "Find provider registration code" },
+    { "agent": "reviewer", "task": "Review auth-related code paths" }
+  ]
+}
+```
+
+每个 task 都会走一次 single 的 `runSingleAgent` 路径，也就是各自启动一个独立 `pi` 子进程。代码先检查任务数，最多 8 个；真正执行时通过 `mapWithConcurrencyLimit` 控制并发，最多 4 个子进程同时跑。
+
+运行期间，父工具维护一个 `allResults` 数组。每个子进程有更新时，父工具会把当前完成数和运行数通过 `onUpdate` 发回 UI，例如“2/3 done, 1 running”。所有任务结束后，它把每个 task 的结果整理成小结返回给父模型。为了避免一次并行输出塞太多上下文，每个 task 返回给父模型的文本最多 50 KB；完整消息、stderr、usage 等放在 tool details 里。
+
+**chain：多个 agent 按顺序接力**
+
+chain 的输入像这样：
+
+```json
+{
+  "chain": [
+    { "agent": "scout", "task": "Find the read tool implementation" },
+    { "agent": "planner", "task": "Use these findings to propose a refactor plan:\n{previous}" },
+    { "agent": "worker", "task": "Implement the plan:\n{previous}" }
+  ]
+}
+```
+
+chain 一次只跑一个子进程。第一步 `scout` 完成后，代码取它的最终输出，存进 `previousOutput`。第二步 `planner` 的 task 里有 `{previous}`，执行前会替换成 scout 的输出。第三步同理，会拿到 planner 的输出。
+
+如果某一步失败，chain 会停止，返回“停在哪一步、哪个 agent 失败、失败输出是什么”，并把已经完成的步骤放进 details。所有步骤成功时，返回最后一步的最终输出。
 
 它还定义了自己的 agent 配置格式：markdown frontmatter 里有 `name`、`description`，可选 `tools` 和 `model`，正文作为子进程的附加 system prompt。`~/.pi/agent/agents/*.md` 是用户级 agent，`.pi/agents/*.md` 是项目级 agent；默认只加载用户级。项目级 agent 需要设置 `agentScope: "project"` 或 `"both"`，交互模式下还会提示确认。
 
-示例自带的 agent 有 `scout`、`planner`、`reviewer`、`worker`。它们是几份 markdown 配置，不是 core 里的新类。
+示例自带的 agent 有 `scout`、`planner`、`reviewer`、`worker`。它们是几份 markdown 配置，不属于 core 里的新类。
 
 所以更准确的结论是：**pi core 没有内置 subagent/multi-agent 编排；coding-agent 默认也不带 agent 工具；但 pi 提供 extension 和 tool 机制，仓库里已经有 subagent 示例扩展，说明这类能力可以放在应用层或扩展层实现。**
 

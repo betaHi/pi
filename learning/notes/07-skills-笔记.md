@@ -6,7 +6,7 @@
 
 ---
 
-## 题眼：skill 是索引，不是常驻上下文
+## 题眼：skill 以索引常驻，正文按需进入上下文
 
 skill 的正文可以很长，也可能带脚本、参考资料和使用流程。如果启动时把所有正文塞进 system prompt，成本高，且多数任务用不上。
 
@@ -14,7 +14,7 @@ pi 的做法是两层：
 - 常驻层：system prompt 里只放 skill 清单，包含名字、描述、位置和相对路径解析规则。
 - 按需层：模型判断任务匹配时用 `read` 读 `SKILL.md`；用户也可以用 `/skill:name` 把正文直接展开到本轮输入。
 
-这不是“自动执行 skill”，而是把 skill 做成可检索的能力索引。描述写得准，模型才更可能在合适任务里读取正文。
+这里的重点是把 skill 做成可检索的能力索引。描述写得准，模型才更可能在合适任务里读取正文。
 
 ---
 
@@ -64,7 +64,7 @@ interface Skill {
 
 ## 二、从哪里发现
 
-coding-agent 不是只扫两个固定目录。真实路径来源先由 `DefaultPackageManager` 汇总，再交给 `DefaultResourceLoader` 加载。
+coding-agent 的来源范围比两个固定目录更宽。真实路径来源先由 `DefaultPackageManager` 汇总，再交给 `DefaultResourceLoader` 加载。
 
 主要来源：
 
@@ -78,7 +78,7 @@ coding-agent 不是只扫两个固定目录。真实路径来源先由 `DefaultP
 | packages | npm/git/local package 的 `skills/` 或 `pi.skills` manifest |
 | extension | `resources_discover` 事件可返回额外 skill 路径 |
 
-`--no-skills`/`noSkills` 不是绝对屏蔽一切：默认/自动发现会被关掉，但显式 CLI/SDK 追加路径仍可加载。这是为了让“默认不要扫”和“我明确指定这个 skill”同时成立。
+`--no-skills`/`noSkills` 会关掉默认/自动发现路径；显式 CLI/SDK 追加路径仍可加载。这能同时支持“默认不要扫”和“我明确指定这个 skill”两种需求。
 
 冲突处理也很重要：同名 skill 只保留第一个，后面的产生 collision diagnostic。package-manager 会按优先级排序，项目配置和项目自动发现优先于用户级，package 资源靠后；CLI/显式路径在 resource loader 里作为显式输入合并。
 
@@ -99,7 +99,7 @@ coding-agent 不是只扫两个固定目录。真实路径来源先由 `DefaultP
 
 ## 四、怎么交给模型
 
-`buildSystemPrompt` 只在 read 工具可用时追加 skill 清单。没有 read 工具，给出路径也无法让模型读取正文，所以清单会被跳过。
+`buildSystemPrompt` 在 read 工具可用时追加 skill 清单。没有 read 工具，给出路径也无法让模型读取正文，所以清单会被跳过。
 
 `formatSkillsForPrompt` 会过滤掉 `disableModelInvocation=true` 的 skill，然后生成 XML：
 
@@ -143,7 +143,7 @@ References are relative to ...
 用户附加参数
 ```
 
-这里的参数是原样追加，不是单独结构化字段。`disable-model-invocation` 的 skill 不出现在 system prompt 清单里，但仍可以用 `/skill:name` 强制展开。
+这里的参数会原样追加，没有单独结构化字段。`disable-model-invocation` 的 skill 不出现在 system prompt 清单里，但仍可以用 `/skill:name` 强制展开。
 
 `packages/agent` 的 harness 层也有同类能力：`formatSkillInvocation` 和 `AgentHarness.skill()` 做的是相同思想，只是没有 coding-agent 的 slash command UI 包装。
 
