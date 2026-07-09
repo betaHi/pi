@@ -1,34 +1,53 @@
 # 07 Skills 系统 · 学习笔记
 
-> README 核心问题：reusable instruction 怎么被发现、暴露、按需加载？为什么只把描述放进 prompt、正文靠 read 取？
-> 证据来源：`core/skills.ts`、`formatSkillsForPrompt`、`resource-loader.ts`、`interactive-mode.ts`。
-> 一句话：skill = 一个带 frontmatter 的 `SKILL.md`；发现后只把「名字+描述+位置」注入 system prompt，正文按需由模型用 `read` 工具自取（渐进式加载）。
+> 核心问题：reusable instruction 怎么被发现、暴露、按需加载？为什么只把描述放进 prompt，正文靠 read 或显式命令再取？
+> 证据来源：`packages/coding-agent/src/core/skills.ts`、`package-manager.ts`、`resource-loader.ts`、`system-prompt.ts`、`agent-session.ts`、`docs/skills.md`，以及 `packages/agent/src/harness/skills.ts`。
+> 一句话：skill 是带 frontmatter 的 Markdown 能力包。pi 启动时只把 `name`、`description`、`location` 放进 system prompt；真正的说明正文要么由模型按描述用 `read` 加载，要么由用户用 `/skill:name` 强制展开。
 
 ---
 
-## 题眼：为什么只注入描述，不注入正文
+## 题眼：skill 是索引，不是常驻上下文
 
-一份 skill 可能很长（几百上千 token）。如果把所有 skill 正文都塞进 system prompt，几十个 skill 就把上下文占满了，而且大多数当前任务用不上。
+skill 的正文可以很长，也可能带脚本、参考资料和使用流程。如果启动时把所有正文塞进 system prompt，成本高，且多数任务用不上。
 
-pi 的做法：system prompt 里每个 skill 只放三样——`name`、`description`、`location`（文件路径）。模型看到"有哪些 skill、各自干嘛、文件在哪"，**匹配到任务时才用 `read` 工具去读那份 `SKILL.md`**，正文这时才进上下文。
+pi 的做法是两层：
+- 常驻层：system prompt 里只放 skill 清单，包含名字、描述、位置和相对路径解析规则。
+- 按需层：模型判断任务匹配时用 `read` 读 `SKILL.md`；用户也可以用 `/skill:name` 把正文直接展开到本轮输入。
 
-这是渐进式加载（progressive disclosure）：描述当索引，正文当按需内容。它和 tool 系统同思路——先给模型一个轻量目录，真要用再展开。
+这不是“自动执行 skill”，而是把 skill 做成可检索的能力索引。描述写得准，模型才更可能在合适任务里读取正文。
 
 ---
 
 ## 一、skill 在磁盘上是什么
 
-一个 skill = 一个 `SKILL.md` 文件，头部是 YAML frontmatter，正文是给模型的指令。frontmatter 字段（`SkillFrontmatter`）：
+常见形态是一个目录加一个 `SKILL.md`：
+
+```text
+my-skill/
+  SKILL.md
+  scripts/
+  references/
+  assets/
+```
+
+`SKILL.md` 的 frontmatter 当前实现会读取这些字段：
 
 ```ts
 interface SkillFrontmatter {
-  name?: string;                        // 可选，缺了用父目录名兜底
-  description?: string;                 // 必填，缺了这个 skill 不加载
-  "disable-model-invocation"?: boolean; // 可选，true = 模型看不到，只能 /skill:name 显式调
+  name?: string;
+  description?: string;
+  "disable-model-invocation"?: boolean;
+  [key: string]: unknown;
 }
 ```
 
-解析后产出 `Skill` 对象：
+实现上的关键点：
+- `description` 必须有，空描述的 skill 不加载。
+- `name` 可以缺，缺了用父目录名兜底；这比 Agent Skills 标准更宽松。
+- `name` 和 `description` 有长度、字符规则校验，但大多数问题只产生 warning，不阻止加载。
+- 未使用的 frontmatter 字段会被忽略。比如 docs 里提到的 `allowed-tools` 当前没有接入工具准入逻辑，不能把它当权限机制。
+
+解析后得到的对象大致是：
 
 ```ts
 interface Skill {
@@ -43,97 +62,122 @@ interface Skill {
 
 ---
 
-## 二、从哪发现（三个来源）
+## 二、从哪里发现
 
-`loadSkills` 扫三处，来源标记 `user` / `project` / `path`：
+coding-agent 不是只扫两个固定目录。真实路径来源先由 `DefaultPackageManager` 汇总，再交给 `DefaultResourceLoader` 加载。
 
-| 来源 | 目录 |
+主要来源：
+
+| 来源 | 说明 |
 |---|---|
-| user | `<agentDir>/skills/` |
-| project | `<cwd>/<CONFIG_DIR_NAME>/skills/`（项目级） |
-| path | 额外显式传入的路径 `skillPaths` |
+| 项目 `.pi/skills/` | 自动发现，支持根目录 `.md` 和递归 `SKILL.md` |
+| 全局 `~/.pi/agent/skills/` | 自动发现，规则同 `.pi/skills/` |
+| 项目 `.agents/skills/` | 从当前 cwd 往祖先目录找，直到 git 根或文件系统根；只发现递归 `SKILL.md` |
+| 全局 `~/.agents/skills/` | 兼容其他 harness；只发现递归 `SKILL.md` |
+| settings / CLI | `settings.json` 的 `skills`、`--skill <path>`，可指文件或目录 |
+| packages | npm/git/local package 的 `skills/` 或 `pi.skills` manifest |
+| extension | `resources_discover` 事件可返回额外 skill 路径 |
 
-`getSource` 判断一个路径归哪类：显式路径若落在 user/project 目录下仍归对应类，否则归 `path`。
+`--no-skills`/`noSkills` 不是绝对屏蔽一切：默认/自动发现会被关掉，但显式 CLI/SDK 追加路径仍可加载。这是为了让“默认不要扫”和“我明确指定这个 skill”同时成立。
 
----
-
-## 三、目录扫描规则（`loadSkillsFromDir`）
-
-源码注释写明三条：
-- 某目录里有 `SKILL.md` → 把这个目录当一个 skill 根，**不再往下递归**；
-- 否则，加载根目录下直接的 `.md` 子文件；
-- 递归子目录去找 `SKILL.md`。
-
-还支持 ignore 文件过滤。
+冲突处理也很重要：同名 skill 只保留第一个，后面的产生 collision diagnostic。package-manager 会按优先级排序，项目配置和项目自动发现优先于用户级，package 资源靠后；CLI/显式路径在 resource loader 里作为显式输入合并。
 
 ---
 
-## 四、解析一个 skill（`loadSkillFromFile`）
+## 三、目录扫描规则
 
-1. `readFileSync` 读文件 → `parseFrontmatter` 切出 frontmatter；
-2. **校验**：`validateDescription`（必填、长度上限）、`validateName`（只能小写字母数字连字符、不能首尾连字符、不能连续 `--`）；
-3. **容错**：校验出 warning **不阻止加载**（进 diagnostics）；**唯一硬失败是 description 完全为空** → 返回 null；
-4. name 缺省用**父目录名**兜底（`frontmatter.name || parentDirName`）；
-5. 产出 `Skill` 对象。
+`loadSkillsFromDirInternal` 的核心规则：
 
-→ 校验宽松：名字不规范只警告，只有描述为空才拒。设计上倾向"尽量加载"。
+1. 如果当前目录有 `SKILL.md`，这个目录就是一个 skill 根，加载后不再递归子目录。
+2. 否则在“根目录允许直接文件”的模式下，加载直接子级 `.md` 文件。
+3. 继续递归子目录寻找 `SKILL.md`。
+4. 跳过点目录、`node_modules`，并读取 `.gitignore`、`.ignore`、`.fdignore`。
+
+`.pi/skills` 和 `~/.pi/agent/skills` 使用 pi 模式，根目录 `.md` 会被当作 skill；`.agents/skills` 使用 agents 模式，根目录 `.md` 不加载，只找 `SKILL.md`。这个差异容易漏。
 
 ---
 
-## 五、怎么交给模型（`formatSkillsForPrompt`，核心）
+## 四、怎么交给模型
 
-**不把正文塞进上下文**，只在 system prompt 里放一个 XML 清单，每个 skill 三样：
+`buildSystemPrompt` 只在 read 工具可用时追加 skill 清单。没有 read 工具，给出路径也无法让模型读取正文，所以清单会被跳过。
 
-```
+`formatSkillsForPrompt` 会过滤掉 `disableModelInvocation=true` 的 skill，然后生成 XML：
+
+```text
 The following skills provide specialized instructions for specific tasks.
 Use the read tool to load a skill's file when the task matches its description.
+When a skill file references a relative path, resolve it against the skill directory ...
+
 <available_skills>
   <skill>
     <name>...</name>
     <description>...</description>
-    <location>/绝对路径/SKILL.md</location>
+    <location>/absolute/path/SKILL.md</location>
   </skill>
 </available_skills>
 ```
 
-关键点：
-- **prompt 明说 "Use the read tool to load a skill's file when the task matches its description"** —— 平时不加载正文，匹配时模型自己 `read`。
-- **`disableModelInvocation: true` 的 skill 被排除出清单**（`visibleSkills = skills.filter(s => !s.disableModelInvocation)`）——模型看不到，只能显式调。
-- skills 清单只在**有 read 工具时**才拼进 system prompt（见 Context 篇：`buildSystemPrompt` 里 `hasRead && skills.length` 判断）——没 read 工具，清单给了也没用。
+这里有三个设计点：
+- prompt 里放的是索引，不放正文。
+- location 是绝对路径，并且提示相对路径按 skill 目录解析。
+- `disable-model-invocation` 只影响“模型自主发现”，不影响用户显式调用。
 
 ---
 
-## 六、`/skill:name` 显式调用
+## 五、`/skill:name` 显式调用
 
-`disableModelInvocation` 的 skill 模型看不到，但用户能用 `/skill:name` 显式触发。
+交互界面会把 skill 暴露成 `/skill:<name>` slash command，前提是 `enableSkillCommands` 开启，默认开启。执行路径在 `AgentSession._expandSkillCommand`：
 
-- slash command 有三种来源：`SlashCommandSource = "extension" | "prompt" | "skill"`。
-- 每个 skill 注册成一个命令：interactive 模式里 `const commandName = skill:${skill.name}`。
+1. 识别 `/skill:name args`。
+2. 从已加载 skills 里按 name 找到对应文件。
+3. 读取 `SKILL.md`，去掉 frontmatter。
+4. 包成：
 
-→ 两条路进模型：① 模型自主（在清单里、用 read 取正文）② 用户 `/skill:name` 显式（不受 disableModelInvocation 限制）。
+```text
+<skill name="..." location="...">
+References are relative to ...
+
+正文
+</skill>
+
+用户附加参数
+```
+
+这里的参数是原样追加，不是单独结构化字段。`disable-model-invocation` 的 skill 不出现在 system prompt 清单里，但仍可以用 `/skill:name` 强制展开。
+
+`packages/agent` 的 harness 层也有同类能力：`formatSkillInvocation` 和 `AgentHarness.skill()` 做的是相同思想，只是没有 coding-agent 的 slash command UI 包装。
+
+---
+
+## 六、边界
+
+pi 的 skill 系统解决的是发现、索引和按需加载，不解决这些问题：
+
+- 不保证模型一定会读匹配的 skill；必要时用 `/skill:name` 强制。
+- 不自动执行 skill 里的脚本；脚本只是说明和资源，是否执行仍由模型调用工具完成。
+- 不用 `allowed-tools` 做权限控制；工具可用性仍由 session 的工具注册、allowlist 和 active tools 决定。
+- 不做 skill 内容安全审查；skill 可以要求模型执行危险动作，使用前要审阅来源。
 
 ---
 
 ## 核心链路
 
-```
-ResourceLoader.getSkills()
-  → loadSkills()                     // 扫 user/project/path 三目录
-    → loadSkillsFromDirInternal()    // 发现 SKILL.md（有则不递归）
-      → loadSkillFromFile()          // 解析 frontmatter + 校验 → Skill 对象
-  → formatSkillsForPrompt(skills)    // 只注入 name+description+location 到 system prompt
-  → 模型 read <location> 取正文（渐进式加载） / 或用户 /skill:name 显式调
+```text
+DefaultPackageManager.resolve()
+  -> 汇总 packages / settings / 自动发现 / CLI 资源
+DefaultResourceLoader.reload()
+  -> loadSkills(skillPaths, includeDefaults=false)
+  -> loadSkillFromFile(frontmatter 校验 + SourceInfo)
+AgentSession._rebuildSystemPrompt()
+  -> buildSystemPrompt(... skills ...)
+  -> formatSkillsForPrompt(name + description + location)
+运行时
+  -> 模型按描述 read SKILL.md
+  -> 或用户 /skill:name 强制展开正文
 ```
 
 ---
 
 ## 一句话总结
 
-skill = 带 frontmatter 的 `SKILL.md`；三个目录发现 → 解析校验成 `Skill` → 只把「名字+描述+位置」注入 system prompt，正文按需由模型用 `read` 自取。这是**用描述当索引、正文当按需内容**的渐进式加载，省上下文。
-
----
-
-## 待深入
-- [ ] `parseFrontmatter` 的实现（utils/frontmatter.ts），未细读。
-- [ ] skill 正文里引用相对路径的解析规则（prompt 里提到"resolve against skill directory"）——机制点到，未验证实现。
-- [ ] agent 包里的 `formatSkillsForSystemPrompt`（core 版）与 coding-agent 版差异：已确认逻辑相同，仅换行 + "用 read 工具"措辞不同；core 版当前链路未被调用。
+skill 是“描述常驻、正文按需”的能力包。pi 负责发现来源、校验、去重、把索引放进 system prompt，并提供 `/skill:name` 强制展开；skill 的选择质量、安全性和具体执行仍要靠描述、用户判断和工具准入来保证。
