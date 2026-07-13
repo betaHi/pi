@@ -24,6 +24,16 @@ pi 的 session tree 可以恢复一段会话。它记录用户消息、assistant
 
 当前源码里没有专门的 embedding、向量库、记忆抽取器、去重器或长期记忆策略。出现的 `InMemory*` 主要是内存存储或测试用实现。这个事实很重要：session 持久化可以作为输入来源，也可以作为审计记录；长期记忆的策略需要另外设计。
 
+<!-- 图1：session 记录与长期记忆的差别
+生图 prompt：
+一张横版对比图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+左栏标题「session 记录」：画一棵 append-only session tree，节点包括 user、assistant、toolResult、custom，标「恢复当前会话、审计历史」。
+右栏标题「长期记忆」：画一个外部 store 图标，旁边列「提取」「存储」「检索」「注入」「删除/降权」。
+中间用箭头从 session tree 指向外部 store，标「可作为提取来源」。再从外部 store 回到上下文，标「检索后注入」。
+底部小字：「session 保存历史；长期记忆还要有抽取、检索、作用域和治理。」
+建议文件名：./pi_12_1.png
+-->
+
 ## 二、长期记忆系统的四步
 
 一个实用的 memory 系统通常要做四步。
@@ -36,6 +46,16 @@ pi 的 session tree 可以恢复一段会话。它记录用户消息、assistant
 | 注入 | 把相关记忆放进模型上下文 | `context` hook、custom message、project context、resource discovery | 注入格式、数量、优先级、冲突处理 |
 
 pi 在“事件时机”和“上下文入口”上给了接口。记忆质量主要取决于应用层的提取、存储和检索策略。
+
+<!-- 图2：memory 四步和 pi 的接入点
+生图 prompt：
+一张横版四步流程图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+四个主节点从左到右：「提取」「存储」「检索」「注入」。
+在「提取」下标 pi 提供 turn_end/message_end/session_shutdown 事件；在「存储」下画外部 store，标应用层选择 DB/文件/向量库；在「检索」下标 query、过滤、排序、预算；在「注入」下分三条：context hook、custom_message、project context/resource discovery。
+用颜色区分 pi 接口（蓝绿色）和应用层策略（琥珀色）。
+底部小字：「pi 给事件时机和上下文入口；记忆质量主要看应用层策略。」
+建议文件名：./pi_12_2.png
+-->
 
 ## 三、路径一：`context` hook，适合临时相关记忆
 
@@ -59,6 +79,16 @@ agent 准备 LLM context
 - 适合当前问题相关、用完可以丢弃的记忆。
 
 这条路径适合做检索式记忆：根据当前输入、cwd、工具状态，从外部 store 找出少量相关条目，压缩成一段说明，插进 messages。它的难点在检索质量和 token 预算。
+
+<!-- 图3：三条记忆注入/状态路径
+生图 prompt：
+一张横版三栏图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+第一栏「context hook」：外部 store 检索结果 → emitContext → messages → LLM，标「临时相关，不自动写回 session」。
+第二栏「custom_message」：extension sendMessage → session tree 的 custom_message 节点 → convertToLlm user message，标「进上下文，也进会话历史」。
+第三栏「appendEntry / custom」：extension appendEntry → session tree 的 custom 节点 → extension 恢复状态，标「留痕，不进 LLM context」。
+底部小字：「给模型看的内容和给系统自己恢复的状态要分开。」
+建议文件名：./pi_12_3.png
+-->
 
 ## 四、路径二：custom message，适合进入会话历史的内容
 
@@ -129,6 +159,16 @@ extension 还可以在 `resources_discover` 里返回 skill、prompt、theme 路
 memory 关注“把事实或偏好带回上下文”。下一篇自我进化关注“根据反馈调整行为规则”。两者会复用相同接口：session 事件、extension hook、resource loader、custom entry。区别在于，memory 主要做检索和注入；自我进化还要处理评估、验证和版本回退。
 
 pi 给 memory 提供的是接入面。要做出稳定可用的长期记忆，还需要应用层把提取、存储、检索、作用域和治理补齐。
+
+<!-- 图4：一个 memory 系统落到 pi 上
+生图 prompt：
+一张分层架构图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+下层「pi 接口」包含 session events、context hook、custom_message、appendEntry、project context、resources_discover。
+上层「应用层 memory」包含抽取器、外部 store、检索器、去重/作用域/删除策略、注入预算。
+箭头：session events → 抽取器 → 外部 store；用户输入/cwd → 检索器 → context hook/custom_message；appendEntry 旁标「内部状态」。
+底部小字：「pi 提供接入面；memory 系统负责策略、存储和治理。」
+建议文件名：./pi_12_4.png
+-->
 
 ---
 

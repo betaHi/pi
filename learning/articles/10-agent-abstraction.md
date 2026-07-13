@@ -22,6 +22,16 @@ placeholder
 
 所以讨论 Agent 时，要把两个层次分开：操作系统里的进程是一层；进程里创建的 Agent 对象是另一层。pi CLI、web-ui 或你的应用进程里，都可以创建 Agent 对象。
 
+<!-- 图1：Agent 是进程内对象
+生图 prompt：
+一张横版示意图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+画一个大框「当前 JS 进程 / 浏览器运行时」，里面并排放三个小卡片「Agent A」「Agent B」「Agent C」。每张卡片里列「messages / model / tools / queues」。
+大框外避免画服务器或端口；下方标「new Agent(options) 创建的是当前进程里的内存对象」。
+右侧加一个小对照：「pi CLI / web-ui / 你的应用」都可以在自己的进程里创建 Agent 对象。
+底部小字：「Agent 是一段对话的运行对象，一个进程里可以有多个实例。」
+建议文件名：./pi_10_1.png
+-->
+
 ## 二、Agent state 里有什么
 
 `createMutableAgentState` 创建的是 Agent 暴露出来的 state。主要字段如下：
@@ -51,6 +61,15 @@ state = {
 把创建一个 Agent 时实际持有的东西列全，是这几类：`state`（对话状态，唯一对外暴露的）、两个消息队列（steering 和 follow-up）、事件监听者集合、一组可注入的回调（`convertToLlm`、`transformContext`、`streamFn`、`getApiKey`、`beforeToolCall` 等），以及传输和运行配置（`sessionId`、`transport`、`toolExecution` 等）。所以创建一个 Agent，就是在内存里创建一个把这些打包在一起的对象。它不连数据库、不起服务、不占端口，也不内置应用级鉴权、存储、skill、extension 系统——这些是 AgentSession 或其他外层应用装的。
 
 Context 篇讲过的三件套 `systemPrompt`、`messages`、`tools`，正好来自这里。Agent 每次调用 loop 前，会把这三项打包成 context snapshot。
+
+<!-- 图2：Agent 实例里实际持有的东西
+生图 prompt：
+一张横版分层卡片图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+中心是一个大卡片「Agent 实例」。内部划分五块：1「state：systemPrompt / model / thinkingLevel / tools / messages / isStreaming / streamingMessage / pendingToolCalls / errorMessage」；2「queues：steeringQueue / followUpQueue」；3「listeners：subscribe 注册的监听者」；4「callbacks：convertToLlm / transformContext / streamFn / beforeToolCall / afterToolCall」；5「runtime config：sessionId / transport / toolExecution」。
+在 state 的 systemPrompt/messages/tools 三项旁加括号「Context 篇三件套」。
+底部小字：「state 是对外暴露的主要状态；队列、监听者和 activeRun 是实例内部控制字段。」
+建议文件名：./pi_10_2.png
+-->
 
 ## 三、Agent 暴露哪些方法
 
@@ -111,6 +130,16 @@ loop 返回的事件会经过 `processEvents`。`processEvents` 一边更新 Age
 
 所以可以这样理解：Agent 负责保存状态和管理生命周期；`runAgentLoop` 负责模型、工具和上下文回填的循环。
 
+<!-- 图3：Agent 连接 runAgentLoop
+生图 prompt：
+一张横版流程图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+主线节点从左到右：agent.prompt(input) → normalizePromptInput → runWithLifecycle(activeRun + AbortController) → createContextSnapshot(systemPrompt/messages/tools) + createLoopConfig(options) → runAgentLoop → processEvents → listeners。
+在 runAgentLoop 下方画一个小循环「模型响应 → 工具调用 → toolResult 回填 → 下一 turn」。
+在 processEvents 旁标「更新 streamingMessage / pendingToolCalls / errorMessage，并按顺序通知 listener」。
+底部小字：「Agent 管状态和生命周期；loop 管模型、工具和上下文回填。」
+建议文件名：./pi_10_3.png
+-->
+
 ## 五、为什么 core Agent 保持轻
 
 Agent 构造函数接收一组 `AgentOptions`。其中一部分有默认值，一部分默认留空：
@@ -168,6 +197,16 @@ core Agent 保持轻，是因为它只关心对话如何跑。存储、资源发
 
 这个分层让同一个 Agent 可以被不同环境复用。Node CLI 可以用 AgentSession 装资源和鉴权；浏览器可以直接用 Agent，再配自己的 IndexedDB、API key prompt 和 sandbox tools；测试也可以传入假的 `streamFn` 和工具，单独验证 loop 行为。
 
+<!-- 图4：Agent 与 AgentSession 边界
+生图 prompt：
+一张横版嵌套图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+内层方框「Agent」列：messages、systemPrompt、model、tools、queues、activeRun、runAgentLoop 入口。
+外层方框「AgentSession」包住 Agent，列：SessionManager、ModelRegistry、ResourceLoader、ExtensionRunner、内置工具、_rebuildSystemPrompt、compaction。
+左侧画「web-ui」箭头直接连到 Agent，标「浏览器自己补存储/鉴权/工具」。右侧画「coding-agent CLI」箭头连到 AgentSession，标「Node 端设施齐全」。
+底部小字：「Agent 管对话怎么跑；AgentSession 管这段对话的外围设施。」
+建议文件名：./pi_10_4.png
+-->
+
 ## 七、subagent 和 multi-agent 放在哪一层
 
 理解了 Agent 的职责边界，一个自然的问题是：pi 支不支持 subagent 或 multi-agent。
@@ -220,7 +259,14 @@ pi --mode json -p --no-session \
 
 父进程读取子进程 stdout 里的 JSON 事件，收集 assistant 消息、工具结果、usage 和 stopReason。子进程成功时，父工具返回最后一条 assistant 文本；失败时，返回 errorMessage、stderr 或最后输出。
 
-> 配图提示：画一个从父 agent 到 `subagent` 工具再到单个 `pi` 子进程的流程图。节点依次是：父模型调用 `subagent(agent, task)`、发现 agent markdown、写临时 system prompt、启动 `pi --mode json -p --no-session`、读取 JSON 事件、返回最终文本给父模型。重点标出“一个 task -> 一个子进程 -> 一个结果”。
+<!-- 图5：subagent single 模式
+生图 prompt：
+一张横版流程图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+节点依次是：父模型调用 `subagent(agent, task)` → subagent 工具 → 发现 agent markdown → 写临时 system prompt → 启动 `pi --mode json -p --no-session` 子进程 → 读取 JSON 事件 → 返回最终文本给父模型。
+用单条粗箭头强调「一个 task → 一个子进程 → 一个结果」。
+底部小字：「single 模式把一次委派变成一次独立 pi 子进程调用。」
+建议文件名：./pi_10_5.png
+-->
 
 ### parallel：多个 agent 并行处理多个 task
 
@@ -240,7 +286,14 @@ parallel 的输入是一组任务，例如：
 
 父工具会维护一个 `allResults` 数组。每个子进程有新消息时，对应位置会被更新，并通过 `onUpdate` 把进度发给 UI，例如“2/3 done, 1 running”。所有任务结束后，父工具把每个 task 的输出整理成小结返回给父模型。为了控制返回给父模型的上下文量，每个 task 的可见输出最多 50 KB；完整消息、stderr、usage 等保存在 tool details。
 
-> 配图提示：画一个父 agent 调用 `subagent` 后分叉成多个并行子进程的图。左边是父 agent，中间是 `subagent` 工具，右边并排 3 到 4 个 `pi` 子进程，标“最多 4 个并发 / 最多 8 个任务”。每个子进程箭头回到一个 `allResults` 汇总表，再汇成父模型可见的小结。旁边标“每个 task 返回给模型最多 50 KB，完整内容在 details”。
+<!-- 图6：subagent parallel 模式
+生图 prompt：
+一张横版分叉汇总图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+左边是父 agent，中间是 `subagent` 工具，右边并排 3 到 4 个 `pi` 子进程小框，标「最多 4 个并发 / 最多 8 个任务」。
+每个子进程箭头回到一个 `allResults` 汇总表，汇总表再输出「父模型可见小结」。旁边加标注：「每个 task 返回给模型最多 50 KB；完整消息、stderr、usage 在 details」。
+底部小字：「parallel 模式并行跑多个独立子进程，父工具负责进度和结果汇总。」
+建议文件名：./pi_10_6.png
+-->
 
 ### chain：多个 agent 按顺序接力
 
@@ -260,7 +313,14 @@ chain 的输入是一条步骤列表，例如：
 
 如果某一步失败，chain 会停止，返回失败发生在哪一步、哪个 agent 失败、失败输出是什么，并把已经完成的步骤放进 details。所有步骤成功时，父工具返回最后一步的最终输出。
 
-> 配图提示：画一个线性接力图：Step 1 `scout` 输出压缩上下文，箭头进入 Step 2 `planner` 的 `{previous}`，再进入 Step 3 `worker`。每一步下面画一个独立 `pi` 子进程小框。在线路旁标“成功 -> 输出传给下一步；失败 -> chain 停止并返回已完成 details”。
+<!-- 图7：subagent chain 模式
+生图 prompt：
+一张横版线性接力图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+画三个步骤：Step 1 `scout`，Step 2 `planner`，Step 3 `worker`。每一步下面都有一个独立 `pi` 子进程小框。
+从 scout 输出箭头进入 planner 的 `{previous}`，从 planner 输出箭头进入 worker 的 `{previous}`。在线路旁标「成功：输出传给下一步」。另画一条红色细分支「失败：chain 停止，返回已完成 details」。
+底部小字：「chain 模式一次只跑一个子进程，用 {previous} 把上一步输出交给下一步。」
+建议文件名：./pi_10_7.png
+-->
 
 它还定义了自己的 agent 配置文件。agent 是 markdown 文件，frontmatter 里有 `name`、`description`，可选 `tools` 和 `model`，正文作为子进程的附加 system prompt。用户级 agent 放在 `~/.pi/agent/agents/*.md`，项目级 agent 放在 `.pi/agents/*.md`。项目级 agent 涉及仓库控制的 prompt，示例里默认不加载，需要显式 scope，并在交互模式下确认。示例自带 `scout`、`planner`、`reviewer`、`worker` 几个 agent 定义，它们是配置文件，不属于 core 里的新类。
 

@@ -20,6 +20,15 @@ pi 的入口可以分成三层：`Agent`、`AgentSession`、`AgentSessionRuntime
 
 选择入口时，可以先问两个问题：是否需要 pi 的资源、工具、session 和 extension；是否需要替换 active session。只需要对话内核时用 `Agent`。需要 coding-agent 的设施时用 `AgentSession`。需要 new session、resume、fork、reload 后继续保持 UI 和 extension 可用时，用 runtime。
 
+<!-- 图1：三层入口
+生图 prompt：
+一张横版三层分层图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+从下到上三层：底层「Agent」标「turn loop / messages / tools / model / queues」；中层「AgentSession」标「SessionManager / ModelRegistry / ResourceLoader / tools / extensions」；上层「AgentSessionRuntime」标「active session replacement / new / resume / fork / import / reload」。
+每层右侧放适用场景：Agent「已有自己的存储和鉴权」；AgentSession「Node/CLI/服务端复用 pi 设施」；Runtime「多会话和重建运行时」。
+底部小字：「层级越往上，默认设施越多，运行时重建能力越完整。」
+建议文件名：./pi_14_1.png
+-->
+
 ## 二、`new Agent`：最小内核
 
 `packages/agent/src/agent.ts` 的 `Agent` 是最底层对话引擎。
@@ -85,6 +94,16 @@ session.dispose();
 
 对于自定义 CLI、服务端 bot 或本地工具，通常可以从 `createAgentSession` 开始。
 
+<!-- 图2：createAgentSession 装配过程
+生图 prompt：
+一张横版装配流程图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+主线节点：AuthStorage → ModelRegistry → SettingsManager → SessionManager → DefaultResourceLoader.reload → findInitialModel/clampThinkingLevel → new Agent → new AgentSession。
+在 new Agent 下面标注注入项：「convertToLlm / streamFn / transformContext / hooks」。在 streamFn 旁画一个小锁图标，标「从 ModelRegistry 取 key/header」。
+右侧输出「session + extensionsResult + modelFallbackMessage」。
+底部小字：「Agent 是内核；createAgentSession 把 Node 端设施接上。」
+建议文件名：./pi_14_2.png
+-->
+
 ## 四、`AgentSessionRuntime`：active session 的运行时
 
 现在的 `main.ts` 会先创建 `AgentSessionRuntime`，再把 runtime 交给 print、interactive 或 rpc 模式。
@@ -129,6 +148,15 @@ SDK 文档里的建议也很明确：单会话应用可以直接用 `AgentSessio
 
 RPC 适合让 IDE、桌面应用、脚本或其他进程通过子进程驱动 pi。
 
+<!-- 图3：运行形态
+生图 prompt：
+一张横版中心辐射图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+中心方块「AgentSessionRuntime」。向外四个方向连接：「print mode：CLI 单发/JSON events」「interactive mode：TUI 输入、补全、渲染」「rpc mode：stdin 命令 / stdout events」「web-ui：core Agent + 浏览器存储/工具」。
+rpc 方向画双向箭头标「JSONL over stdio」。web-ui 方向用虚线标「不走 coding-agent AgentSession」。
+底部小字：「同一套 agent 能力，可以接不同外壳；web-ui 直接复用 core Agent。」
+建议文件名：./pi_14_3.png
+-->
+
 ### web-ui
 
 `packages/web-ui` 走的是另一条路线。它直接使用 core `Agent`，再通过 lit web component `pi-chat-panel` 展示。
@@ -148,6 +176,14 @@ RPC 适合让 IDE、桌面应用、脚本或其他进程通过子进程驱动 pi
 | 要浏览器组件 | `packages/web-ui` 的 `ChatPanel` + core `Agent` |
 
 如果目标是做一个 UI bot 或 CLI，较稳的起点通常是 `createAgentSession`。后续出现多会话、切 cwd、fork、reload 后重绑这些需求，再上 runtime。
+
+<!-- 图4：入口选择决策图
+生图 prompt：
+一张竖向决策流程图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+顶部问题「你只需要 agent loop 吗？」是则到「new Agent」。否则到第二个问题「需要 pi 的 tools/skills/extensions/sessions 吗？」是则到「createAgentSession」。再到第三个问题「需要 new/resume/fork/reload 后重绑 active session 吗？」是则到「createAgentSessionRuntime」。旁边另有分支「浏览器组件」到「web-ui ChatPanel + core Agent」，「外部进程控制」到「RPC mode」。
+底部小字：「先选最小够用层；需要更多设施再往上走。」
+建议文件名：./pi_14_4.png
+-->
 
 ## 七、入口归一化的含义
 
@@ -175,6 +211,15 @@ RPC 适合让 IDE、桌面应用、脚本或其他进程通过子进程驱动 pi
 9. 应用入口把这些机制包装成 CLI、TUI、RPC、web 或自定义 bot。
 
 理解 agent harness，关键在于看清这些层之间的数据流：消息如何进入 loop，工具结果如何回到 session，session 如何投影成 context，extension 在哪些点介入，最后哪一层把它暴露给用户。
+
+<!-- 图5：系列机制地图
+生图 prompt：
+一张横版机制地图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+从左到右画九个节点：agent loop → provider → tool → session → context → skill → extension → memory/self-evolution → application entry。节点之间用箭头连接。
+在 session 到 context 之间标「投影」，tool 到 session 标「toolResult 回填」，extension 向 context/tool/session 三处画细线标「hook」。application entry 向 print/TUI/RPC/web 四个外壳发散。
+底部小字：「理解 harness，就是理解这些机制怎样把一次对话变成可用的应用入口。」
+建议文件名：./pi_14_5.png
+-->
 
 ---
 

@@ -39,6 +39,15 @@ factory 拿到的 `pi` 对象可以做四类事。
 
 加载期和运行期要分清。factory 阶段适合注册 handler、tool、command、provider 等能力。`sendMessage` 这类动作依赖 runtime bind，通常放在事件 handler、命令 handler 或工具执行函数里调用。`registerProvider` 可以在加载期调用，runner 会先排队，bind 后再注册到 model registry。
 
+<!-- 图1：ExtensionAPI 能力面
+生图 prompt：
+一张横版分区图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+中心画一个方块「ExtensionAPI / pi」。从中心向四周分出四组：左侧「注册能力」列 registerTool、registerCommand、registerProvider、registerMessageRenderer；上方「事件订阅」列 pi.on(event, handler)；右侧「运行时动作」列 sendMessage、appendEntry、setActiveTools、setModel、exec；下方「上下文与通信」列 ctx.ui、cwd、sessionManager、modelRegistry、pi.events。
+在图右下角加一个小提示：「factory 阶段注册能力；事件/命令/工具执行期调用动作」。
+底部小字：「extension 是一组把应用策略接入 AgentSession 生命周期的接口。」
+建议文件名：./pi_11_1.png
+-->
+
 ## 二、事件和返回值规则
 
 extension 事件覆盖 agent 的几个关键阶段：资源发现、输入处理、构造上下文、请求 provider、执行工具、写入消息、会话切换和关闭。
@@ -73,6 +82,16 @@ handler 的签名可以理解为：
 
 这张表能解释很多上层功能。权限拦截常放在 `tool_call`，请求审计放在 `before_provider_request`，动态资源放在 `resources_discover`，memory 注入放在 `context`，防误操作放在 `session_before_*`。
 
+<!-- 图2：extension 事件生命周期
+生图 prompt：
+一张横版时间线图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+从左到右画一条 agent 生命周期线：资源发现 → 输入处理 → LLM 前上下文 → provider 请求 → 工具执行 → 消息持久化 → session 操作 → shutdown。
+在线上放事件节点：resources_discover、input、before_agent_start、context、before_provider_request、after_provider_response、tool_call、tool_result、message_end、session_before_switch/fork/compact/tree、session_shutdown。
+每个节点下方用很短文字标返回值行为，例如「追加资源」「transform/handled」「改 systemPrompt」「替换 messages」「替换 payload」「观察响应」「block 工具」「改工具结果」「替换 message」「cancel」「清理」。
+底部小字：「不同事件的返回值规则不同；写 extension 时先选时机，再看 runner 如何处理返回值。」
+建议文件名：./pi_11_2.png
+-->
+
 ## 三、发现和加载
 
 默认加载路径由 `DefaultPackageManager` 和 `DefaultResourceLoader` 组合完成。
@@ -95,6 +114,16 @@ handler 的签名可以理解为：
 加载用 `jiti.import`，TypeScript extension 可以直接运行。factory 可以是 async，pi 会等它完成，再进入 `session_start` 和 `resources_discover` 等阶段。
 
 `noExtensions` 的边界也要分清：它会阻止默认和配置发现的 extension；CLI 显式启用的 extension 仍会加载；SDK 传入的内联 `extensionFactories` 也会加载。这样应用可以关掉用户磁盘上的扩展，同时保留自己传入的内联能力。
+
+<!-- 图3：extension 发现与加载链路
+生图 prompt：
+一张横版汇聚流程图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+左侧四个来源方块：「自动发现 .pi/extensions 和 ~/.pi/agent/extensions」「settings extensions」「packages pi.extensions」「CLI --extension」「SDK extensionFactories」。前四个汇入「DefaultPackageManager.resolve / DefaultResourceLoader.reload」，SDK 内联 factory 单独接入「loadExtensionFactories」。
+中间节点「jiti.import(factory)」→「factory(pi) 注册 handlers/tools/commands」。右侧节点「AgentSession._buildRuntime → ExtensionRunner.bindCore」。
+在 noExtensions 旁加标注：「默认/配置发现关闭；CLI 显式和 SDK 内联仍可进来」。
+底部小字：「加载期注册能力，运行期由 runner 在对应事件点调用 handler。」
+建议文件名：./pi_11_3.png
+-->
 
 ## 四、slash command 的触发方式
 
@@ -154,6 +183,16 @@ AgentSession._buildRuntime()
 ```
 
 extension 把应用层策略接到 AgentSession 生命周期上。工具、命令、资源发现、上下文改写、请求审计、权限拦截、UI 交互，都可以通过这一套接口进入运行时。后面的 memory 和自我进化，会继续复用这些事件点。
+
+<!-- 图4：extension 完整链路
+生图 prompt：
+一张端到端流程图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+主线：DefaultPackageManager.resolve → DefaultResourceLoader.reload → loadExtensions → factory(pi) → ExtensionRunner → AgentSession 生命周期事件。
+从 ExtensionRunner 向下分出三类结果：「注册工具/命令/provider」「事件 handler 修改或观察」「ctx 动作改变 session/UI/model/tools」。
+右侧画几个落地点小标签：权限拦截、请求审计、memory 注入、动态工具、UI 定制。
+底部小字：「extension 是应用层策略进入运行时的通道；能力在加载期注册，效果在事件期发生。」
+建议文件名：./pi_11_4.png
+-->
 
 ---
 
