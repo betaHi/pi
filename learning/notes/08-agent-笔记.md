@@ -10,6 +10,8 @@
 
 `agent.ts` 里 `export class Agent`。`new Agent({...})` 创建一个实例，也就是当前 JS 运行时内存里的一个对象。它本身不启动独立进程、线程或常驻服务。
 
+源码注释里对 `Agent` 的职责有一句很直接的定义：`Agent` owns the current transcript, emits lifecycle events, executes tools, and exposes queueing APIs for steering and follow-up messages。对应到中文，就是：`Agent` 持有当前 transcript，发出生命周期事件，执行工具，并提供 steering / follow-up 消息的排队 API。
+
 几个直接推论（都由源码支持）：
 - **一个实例通常对应一段独立对话状态**：它自己持有 messages、model、tools，实例之间没有共享 transcript。
 - **一个进程可以有多个 Agent 实例**：`new Agent(` 有多个调用点（sdk.ts、web-ui、proxy），没有单例限制。想同时跑三段对话，就 `new` 三个。
@@ -79,6 +81,20 @@ state = {
 - **`get state`**：读当前状态。
 
 【区分】steer vs followUp（源码注释）：steer 是"当前 assistant 轮结束后注入"（插话），followUp 是"agent 本会停下时才跑"（收尾追加）。两者都是队列，区别在注入时机。
+
+### 存活、结束和退出边界
+
+这里要区分 `Agent` 实例和一次 active run。
+
+- **`Agent` 实例的存活时间**：`new Agent(options)` 后，对象会一直存在，直到外层应用不再持有它并由 JS 运行时回收。`packages/agent/src/agent.ts` 里没有 `dispose()`、`destroy()`、`shutdown()` 或 `exit()` 方法。core `Agent` 不负责退出进程。
+- **active run 的开始**：`prompt()` 或 `continue()` 会进入 `runWithLifecycle()`。这里会创建 `AbortController`，设置 `activeRun`，并把 `state.isStreaming` 设为 true。
+- **active run 的结束**：`runAgentLoop` / `runAgentLoopContinue` 结束时会发出 `agent_end`。`agent_end` 表示 loop 不再发后续事件，但 Agent 还要等这个事件的 awaited listeners 都处理完。
+- **真正 idle 的时点**：listener 处理完后，`finishRun()` 会把 `isStreaming` 设回 false，清空 `streamingMessage`，重置 `pendingToolCalls`，resolve `activeRun.promise`，最后把 `activeRun` 设回 undefined。`waitForIdle()` 等的就是这件事；没有 activeRun 时它直接 resolve。
+- **`abort()` 的含义**：`abort()` 只调用当前 activeRun 的 `AbortController.abort()`，请求中止这一轮。它不销毁 Agent 实例，也不清空 transcript。
+- **`reset()` 的含义**：`reset()` 清空 messages、运行时状态和 steering/followUp 队列，但对象本身仍然存在，之后还可以继续 `prompt()`。
+- **进程退出**：print mode、interactive mode、RPC mode 怎么退出，是 coding-agent CLI 或外层应用的职责，不在 core `Agent` 里。
+
+一句话：`Agent` 是一个可长期存在的对话对象；`prompt()` / `continue()` 启动的是一次短生命周期的 active run。run 会结束，Agent 不会因为 run 结束自动销毁。
 
 ---
 

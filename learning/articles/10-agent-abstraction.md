@@ -10,6 +10,19 @@ placeholder
 
 在 pi 的源码里，`Agent` 首先是一个类。`new Agent(options)` 创建的是当前 JS 运行时里的一个对象。它持有一段对话的状态，提供启动、排队、控制和订阅事件的方法。模型请求、工具调用和事件流由它交给 `runAgentLoop` 处理。
 
+源码注释对它的职责有一句概括：`Agent` owns the current transcript, emits lifecycle events, executes tools, and exposes queueing APIs for steering and follow-up messages。换成中文，就是：`Agent` 持有当前 transcript，发出生命周期事件，执行工具，并提供 steering / follow-up 消息的排队 API。
+
+<!-- 图0：Agent 抽象总览
+生图 prompt：
+一张横版总览图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+画面中心是一个大框「Agent」。大框内分四块：1「state：systemPrompt / messages / model / tools」；2「queues：steeringQueue / followUpQueue」；3「runtime：activeRun / AbortController」；4「hooks：convertToLlm / transformContext / streamFn / tool hooks」。
+左侧画「外部调用」进入 Agent，列出 prompt / continue / steer / followUp / abort / subscribe。右侧画「runAgentLoop」节点，内部小循环标「model response → tool calls → tool results → next turn」。Agent 到 runAgentLoop 用箭头连接，标「context snapshot + loop config」。
+下方画一条事件流从 runAgentLoop 回到 Agent，再到「subscribers」，标「AgentEvent：message_start / message_update / message_end / tool_execution / turn_end / agent_end」。
+右下角画一个外层虚线框「AgentSession」，包住 Agent 但颜色更浅，标「存储 / 鉴权 / ResourceLoader / ExtensionRunner 在外层」。突出 Agent 是一段对话的运行对象，不是完整应用。
+底部小字：「Agent 持有 transcript，发出生命周期事件，执行工具，并提供 steering/follow-up 排队 API。」
+建议文件名：./pi_10_0.png
+-->
+
 ## 一、Agent 是类实例，运行在当前进程里
 
 `packages/agent/src/agent.ts` 里有 `export class Agent`。创建 Agent 实例不会启动独立 OS 进程，也不会启动后台服务。它就是当前程序内存里的一个对象。
@@ -58,7 +71,7 @@ state = {
 
 还有一些控制字段不在 `state` 对象里，比如 `activeRun`、steering 队列和 follow-up 队列。它们是 Agent 实例的私有字段。换句话说，`state` 是 Agent 对外暴露的主要状态，内部还另有队列、监听者和运行控制字段。
 
-创建一个 Agent 时，它主要持有这些东西：`state`（对外暴露的对话状态）、两个消息队列（steering 和 follow-up）、事件监听者集合、一组可注入的回调（`convertToLlm`、`transformContext`、`streamFn`、`getApiKey`、`beforeToolCall` 等），以及传输和运行配置（`sessionId`、`transport`、`toolExecution` 等）。也就是说，Agent 是一个把这些状态和配置收在一起的内存对象。它不连数据库、不起服务、不占端口，也不内置应用级鉴权、存储、skill、extension 系统；这些由 AgentSession 或其他外层应用处理。
+创建一个 Agent 时，它主要持有这些内容：`state`（对外暴露的对话状态）、两个消息队列（steering 和 follow-up）、事件监听者集合、一组可注入的回调（`convertToLlm`、`transformContext`、`streamFn`、`getApiKey`、`beforeToolCall` 等），以及传输和运行配置（`sessionId`、`transport`、`toolExecution` 等）。也就是说，Agent 是一个把这些状态和配置收在一起的内存对象。它不连数据库、不起服务、不占端口，也不内置应用级鉴权、存储、skill、extension 系统；这些由 AgentSession 或其他外层应用处理。
 
 Context 篇讲过的三件套 `systemPrompt`、`messages`、`tools`，正好来自这里。Agent 每次调用 loop 前，会把这三项打包成 context snapshot。
 
@@ -98,9 +111,15 @@ Agent 的方法可以按用途分成四组。
 - `subscribe(listener)`：订阅 `AgentEvent`，返回取消订阅函数。
 - `state`：访问当前状态。
 
-这里有一个重要约束：同一个 Agent 同一时刻只跑一个 active run。运行中要追加用户意图，应通过 `steer` 或 `followUp` 排队。
+有一个约束需要注意：同一个 Agent 同一时刻只跑一个 active run。运行中要追加用户意图，应通过 `steer` 或 `followUp` 排队。
 
-所以可以说，一个 Agent 同一时刻只对应一个正在运行的 loop。更准确地说，每次 `prompt()` 或 `continue()` 会启动一次 active run，并在这次 run 里调用 `runAgentLoop`。这次 loop 结束后，Agent 还在；后面再调用 `prompt()` 或 `continue()`，会再启动下一次 loop。
+也就是说，一个 Agent 同一时刻只对应一个正在运行的 loop。每次 `prompt()` 或 `continue()` 会启动一次 active run，并在这次 run 里调用 `runAgentLoop`。这次 loop 结束后，Agent 实例仍然保留；后面再调用 `prompt()` 或 `continue()`，会再启动下一次 loop。
+
+这里还要区分 Agent 实例和 active run 的生命周期。`new Agent(options)` 创建的是一个内存对象。只要外层应用还持有它，这个对象就还在；外层不再持有引用后，它和普通 JavaScript 对象一样，由 JS 运行时按垃圾回收规则处理。`packages/agent/src/agent.ts` 里没有 `dispose()`、`destroy()`、`shutdown()` 或 `exit()` 方法；core Agent 自己不退出进程。
+
+一次 active run 是短生命周期的。`prompt()` 或 `continue()` 进入 `runWithLifecycle()` 后，会创建 `AbortController`，设置 `activeRun`，并把 `state.isStreaming` 设为 true。loop 结束时会发出 `agent_end`。`agent_end` 表示 loop 不再发后续事件，但 Agent 要等这个事件的 listener 都处理完，才会在 `finishRun()` 里清掉运行时状态：`isStreaming` 变回 false，`streamingMessage` 清空，`pendingToolCalls` 重置，`activeRun` 变回 undefined。
+
+因此，run 结束不等于 Agent 销毁。run 结束后，messages、tools、systemPrompt、listeners 和队列仍然属于这个 Agent 实例。`waitForIdle()` 等的是当前 run 和 listener 处理完成；没有 active run 时会直接 resolve。`abort()` 只是中止当前 run，不清空 transcript，也不销毁 Agent。`reset()` 会清空 messages、运行时状态和队列，但对象本身仍然存在。进程退出由 coding-agent 的运行模式或外层应用决定，不属于 core Agent 的职责。
 
 ## 四、Agent 怎样连接 loop
 
@@ -123,14 +142,14 @@ agent.prompt(input)
      )
 ```
 
-这里有两个动作要看清楚：
+需要看清楚两个动作：
 
 - `createContextSnapshot()` 把 `state.systemPrompt`、`state.messages`、`state.tools` 拷贝成一份 loop context。
 - `createLoopConfig()` 把 model、thinking、transport、`convertToLlm`、`transformContext`、tool hooks、队列 drain 函数等传给 loop。
 
 loop 返回的事件会经过 `processEvents`。`processEvents` 一边更新 Agent 的内部状态，例如 streaming message、pending tool calls、error message；一边按订阅顺序调用 listener。`agent_end` 是 loop 的最后事件。Agent 要等这个事件的 listener 都处理完，才算真正 idle；之后 `finishRun()` 会清掉 activeRun。
 
-可以简单理解为：Agent 负责保存状态和管理生命周期；`runAgentLoop` 负责模型、工具和上下文回填的循环。
+可以概括为：Agent 负责保存状态和管理生命周期；`runAgentLoop` 负责模型、工具和上下文回填的循环。
 
 <!-- 图3：Agent 连接 runAgentLoop
 生图 prompt：
@@ -159,7 +178,7 @@ this.toolExecution = options.toolExecution ?? "parallel";
 
 `defaultConvertToLlm` 只做基础过滤，把 user、assistant、toolResult 这几类消息交给模型。默认 `streamFn` 是 `streamSimple`，走标准 provider 请求。
 
-这里要注意：有默认 `streamFn` 不代表一个空配置的 Agent 就能完成真实模型调用。真实调用仍需要可用 model、凭据或自定义 `streamFn`。在应用里，通常由外层提供这些东西。
+需要注意：有默认 `streamFn` 不代表一个空配置的 Agent 就能完成真实模型调用。真实调用仍需要可用 model、凭据或自定义 `streamFn`。在应用里，通常由外层提供这些输入。
 
 coding-agent 的 `createAgentSession` 就是外层装配的例子：
 
@@ -178,7 +197,7 @@ coding-agent 的 `createAgentSession` 就是外层装配的例子：
 | 下一轮准备 | `prepareNextTurn` | turn 结束后、下一次 provider 请求前，替换 context/model/thinkingLevel |
 | 队列语义 | `steeringMode`、`followUpMode` | 控制 steering/follow-up 一次 drain 一条或 drain 所有队列项 |
 
-还有一点要注意：底层 loop 的 `prepareNextTurn` 会拿到 turn context；`AgentOptions.prepareNextTurn` 这一层当前只接收 signal。也就是说，直接用 `new Agent` 时，这个 hook 更适合做不依赖上一轮细节的下一轮准备。要基于 `message`、`toolResults` 或完整 context 做判断，需要看更低层 loop 或外层 harness 的接法。
+还需要注意：底层 loop 的 `prepareNextTurn` 会拿到 turn context；`AgentOptions.prepareNextTurn` 这一层当前只接收 signal。也就是说，直接用 `new Agent` 时，这个 hook 更适合做不依赖上一轮细节的下一轮准备。要基于 `message`、`toolResults` 或完整 context 做判断，需要使用更低层 loop 或外层 harness 的接法。
 
 core Agent 只保留基础能力，是因为它只关心对话如何跑。存储、资源发现、settings、UI、extension runtime，都在外层包装里处理。
 
@@ -197,7 +216,7 @@ core Agent 只保留基础能力，是因为它只关心对话如何跑。存储
 
 一句话：Agent 管一段对话怎么跑，AgentSession 管这段对话的外围设施。`createAgentSession` 内部先创建 Agent，再用 AgentSession 包一层。
 
-这个分层让同一个 Agent 可以被不同环境复用。Node CLI 可以用 AgentSession 装资源和鉴权；浏览器可以直接用 Agent，再配自己的 IndexedDB、API key prompt 和 sandbox tools；测试也可以传入假的 `streamFn` 和工具，单独验证 loop 行为。
+这种分层让同一个 Agent 可以被不同环境复用。Node CLI 可以用 AgentSession 装资源和鉴权；浏览器可以直接用 Agent，再配自己的 IndexedDB、API key prompt 和 sandbox tools；测试也可以传入假的 `streamFn` 和工具，单独验证 loop 行为。
 
 <!-- 图4：Agent 与 AgentSession 边界
 生图 prompt：
@@ -219,13 +238,13 @@ core Agent 只保留基础能力，是因为它只关心对话如何跑。存储
 
 在 coding-agent 默认工具层，内置工具是 read、bash、edit、write、grep、find、ls 这类本地工具。默认 active tools 里没有 Claude Code 那种直接派生子 agent 的 Agent/Task 工具。
 
-但仓库里有一个可运行的 subagent 示例扩展：`packages/coding-agent/examples/extensions/subagent/`。这个 extension 注册 `subagent` 自定义工具。工具执行时，它会为子任务启动独立的 `pi` 子进程，让子任务有自己的上下文窗口。
+但仓库里有一个可运行的 subagent 示例扩展：`packages/coding-agent/examples/extensions/subagent/`。该 extension 注册 `subagent` 自定义工具。工具执行时，它会为子任务启动独立的 `pi` 子进程，让子任务有自己的上下文窗口。
 
 实现链路大致是这样：extension 加载时注册 `subagent` 工具；模型调用这个工具时，工具先按 scope 发现 agent 定义，再把选中的 agent system prompt 写入临时文件，最后启动独立 `pi --mode json -p --no-session ...` 子进程。父进程读取子进程 stdout 里的 JSON 事件，收集 assistant 消息、工具结果、usage、stopReason，再把最终输出作为 `subagent` 工具结果返回给父 agent。
 
-这里的“子 agent”指独立的 `pi` 子进程，有自己的上下文窗口、模型参数、工具配置和输出流。父 agent 不直接共享它的 transcript，只收到工具结果和 details。
+文中的“子 agent”指独立的 `pi` 子进程，有自己的上下文窗口、模型参数、工具配置和输出流。父 agent 不直接共享它的 transcript，只收到工具结果和 details。
 
-这个示例支持 single、parallel、chain 三种模式。三种模式共用同一个 `runSingleAgent` 执行单元，差别在父工具怎样组织多个子进程。
+该示例支持 single、parallel、chain 三种模式。三种模式共用同一个 `runSingleAgent` 执行单元，差别在父工具怎样组织多个子进程。
 
 ### single：一个 agent 处理一个 task
 
@@ -347,8 +366,14 @@ agent.prompt(input)
   -> finishRun 清理 activeRun 和运行时状态
 ```
 
+<!-- 图8：Agent 主链路
+生图 prompt：
+一张横版主链路流程图，现代技术插画风格，温白背景 #F7F3EA，深蓝灰细线描边 #263238，无强渐变无厚重阴影，中文标签清晰。
+从左到右画主线：`new Agent(options)` → `createMutableAgentState` → 保存 `convertToLlm / streamFn / hooks / queue mode` → `agent.prompt(input)` 或 `agent.continue()` → `runWithLifecycle(activeRun + AbortController)` → `runAgentLoop(contextSnapshot + loopConfig)` → `processEvents 更新 state 并通知 listener` → `finishRun 清理 activeRun`。
+在 `runAgentLoop` 节点下方画一个小循环：「assistant message → tool calls → tool results → next turn」。在 `finishRun` 后画一个回到「Agent 实例仍存在」的小箭头，标注「后续还可以再次 prompt / continue」。
+右侧用小分支表示生命周期边界：「agent_end：loop 不再发事件」「waitForIdle：等待 listener 完成」「abort：只中止当前 run」「reset：清空 transcript 和队列，不销毁对象」。
+底部小字：「Agent 对象可以长期存在；active run 是一次短生命周期的执行。」
+建议文件名：./pi_10_8.png
+-->
+
 Agent 是对话运行对象。它把一段 transcript、当前模型、工具、队列和生命周期控制收在一起。每次启动 active run 时，它再把实际 turn loop 交给 `runAgentLoop`。理解这一层之后，前面的 loop、context、tool，后面的 AgentSession 和应用入口，就能对应起来。
-
----
-
-*本文基于对 `@earendil-works/pi-agent-core` 和 `@earendil-works/pi-coding-agent` 源码的阅读。*
