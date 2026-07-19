@@ -6,7 +6,7 @@ placeholder
 
 > 本文主要参考 `packages/agent/src/agent.ts`、`agent-loop.ts`、`types.ts` 和 `packages/coding-agent/src/core/sdk.ts`。
 
-前面第 02 篇讲过 agent loop 怎样把一次 prompt 拆成多个 turn。应用入口篇讲过 `Agent`、`AgentSession`、`AgentSessionRuntime` 三层入口。这里补中间那层最基础的问题：`Agent` 本身是什么。
+前面第 02 篇讲过 agent loop 怎样把一次 prompt 拆成多个 turn。应用入口篇讲过 `Agent`、`AgentSession`、`AgentSessionRuntime` 三层入口。这篇只看中间这一层：`Agent` 本身是什么。
 
 在 pi 的源码里，`Agent` 首先是一个类。`new Agent(options)` 创建的是当前 JS 运行时里的一个对象。它持有一段对话的状态，提供启动、排队、控制和订阅事件的方法。模型请求、工具调用和事件流由它交给 `runAgentLoop` 处理。
 
@@ -58,7 +58,7 @@ state = {
 
 还有一些控制字段不在 `state` 对象里，比如 `activeRun`、steering 队列和 follow-up 队列。它们是 Agent 实例的私有字段。换句话说，`state` 是 Agent 对外暴露的主要状态，内部还另有队列、监听者和运行控制字段。
 
-把创建一个 Agent 时实际持有的东西列全，是这几类：`state`（对话状态，唯一对外暴露的）、两个消息队列（steering 和 follow-up）、事件监听者集合、一组可注入的回调（`convertToLlm`、`transformContext`、`streamFn`、`getApiKey`、`beforeToolCall` 等），以及传输和运行配置（`sessionId`、`transport`、`toolExecution` 等）。所以创建一个 Agent，就是在内存里创建一个把这些打包在一起的对象。它不连数据库、不起服务、不占端口，也不内置应用级鉴权、存储、skill、extension 系统——这些是 AgentSession 或其他外层应用装的。
+创建一个 Agent 时，它主要持有这些东西：`state`（对外暴露的对话状态）、两个消息队列（steering 和 follow-up）、事件监听者集合、一组可注入的回调（`convertToLlm`、`transformContext`、`streamFn`、`getApiKey`、`beforeToolCall` 等），以及传输和运行配置（`sessionId`、`transport`、`toolExecution` 等）。也就是说，Agent 是一个把这些状态和配置收在一起的内存对象。它不连数据库、不起服务、不占端口，也不内置应用级鉴权、存储、skill、extension 系统；这些由 AgentSession 或其他外层应用处理。
 
 Context 篇讲过的三件套 `systemPrompt`、`messages`、`tools`，正好来自这里。Agent 每次调用 loop 前，会把这三项打包成 context snapshot。
 
@@ -98,11 +98,13 @@ Agent 的方法可以按用途分成四组。
 - `subscribe(listener)`：订阅 `AgentEvent`，返回取消订阅函数。
 - `state`：访问当前状态。
 
-这里的一个重要约束是：同一个 Agent 同一时刻只跑一个 active run。运行中要追加用户意图，应通过 `steer` 或 `followUp` 排队。
+这里有一个重要约束：同一个 Agent 同一时刻只跑一个 active run。运行中要追加用户意图，应通过 `steer` 或 `followUp` 排队。
+
+所以可以说，一个 Agent 同一时刻只对应一个正在运行的 loop。更准确地说，每次 `prompt()` 或 `continue()` 会启动一次 active run，并在这次 run 里调用 `runAgentLoop`。这次 loop 结束后，Agent 还在；后面再调用 `prompt()` 或 `continue()`，会再启动下一次 loop。
 
 ## 四、Agent 怎样连接 loop
 
-`prompt()` 本身不直接写模型和工具循环。它会先把输入标准化，再进入 lifecycle 包装，最后调用 `runAgentLoop`。
+`prompt()` 本身不直接处理模型和工具循环。它会先把输入标准化，再进入 lifecycle 包装，最后调用 `runAgentLoop`。
 
 链路大致是：
 
@@ -121,14 +123,14 @@ agent.prompt(input)
      )
 ```
 
-两个打包动作很关键：
+这里有两个动作要看清楚：
 
 - `createContextSnapshot()` 把 `state.systemPrompt`、`state.messages`、`state.tools` 拷贝成一份 loop context。
 - `createLoopConfig()` 把 model、thinking、transport、`convertToLlm`、`transformContext`、tool hooks、队列 drain 函数等传给 loop。
 
-loop 返回的事件会经过 `processEvents`。`processEvents` 一边更新 Agent 的内部状态，例如 streaming message、pending tool calls、error message；一边按订阅顺序调用 listener。`agent_end` 是 loop 的最后事件，Agent 真正 idle 要等这个事件的 listener 都处理完，`finishRun()` 再清掉 activeRun。
+loop 返回的事件会经过 `processEvents`。`processEvents` 一边更新 Agent 的内部状态，例如 streaming message、pending tool calls、error message；一边按订阅顺序调用 listener。`agent_end` 是 loop 的最后事件。Agent 要等这个事件的 listener 都处理完，才算真正 idle；之后 `finishRun()` 会清掉 activeRun。
 
-所以可以这样理解：Agent 负责保存状态和管理生命周期；`runAgentLoop` 负责模型、工具和上下文回填的循环。
+可以简单理解为：Agent 负责保存状态和管理生命周期；`runAgentLoop` 负责模型、工具和上下文回填的循环。
 
 <!-- 图3：Agent 连接 runAgentLoop
 生图 prompt：
@@ -140,7 +142,7 @@ loop 返回的事件会经过 `processEvents`。`processEvents` 一边更新 Age
 建议文件名：./pi_10_3.png
 -->
 
-## 五、为什么 core Agent 保持轻
+## 五、为什么 core Agent 只保留基础能力
 
 Agent 构造函数接收一组 `AgentOptions`。其中一部分有默认值，一部分默认留空：
 
@@ -157,7 +159,7 @@ this.toolExecution = options.toolExecution ?? "parallel";
 
 `defaultConvertToLlm` 只做基础过滤，把 user、assistant、toolResult 这几类消息交给模型。默认 `streamFn` 是 `streamSimple`，走标准 provider 请求。
 
-这里要注意边界：有默认 `streamFn` 不代表一个空配置的 Agent 就能完成真实模型调用。真实调用仍需要可用 model、凭据或自定义 `streamFn`。在应用里，通常由外层提供这些东西。
+这里要注意：有默认 `streamFn` 不代表一个空配置的 Agent 就能完成真实模型调用。真实调用仍需要可用 model、凭据或自定义 `streamFn`。在应用里，通常由外层提供这些东西。
 
 coding-agent 的 `createAgentSession` 就是外层装配的例子：
 
@@ -166,7 +168,7 @@ coding-agent 的 `createAgentSession` 就是外层装配的例子：
 - 用 `transformContext` 接 extension 的 `context` 事件。
 - 在 `AgentSession` 里把 `beforeToolCall` / `afterToolCall` 接到 extension 的 `tool_call` / `tool_result`。
 
-这些接线口可以按用途理解：
+这些选项可以按用途分成几类：
 
 | 类别 | 字段 | 作用 |
 |---|---|---|
@@ -176,13 +178,13 @@ coding-agent 的 `createAgentSession` 就是外层装配的例子：
 | 下一轮准备 | `prepareNextTurn` | turn 结束后、下一次 provider 请求前，替换 context/model/thinkingLevel |
 | 队列语义 | `steeringMode`、`followUpMode` | 控制 steering/follow-up 一次 drain 一条或 drain 所有队列项 |
 
-这里有个小边界：底层 loop 的 `prepareNextTurn` 会拿到 turn context；`AgentOptions.prepareNextTurn` 这一层当前只接收 signal。也就是说，直接用 `new Agent` 时，这个 hook 更适合做不依赖上一轮细节的下一轮准备。要基于 `message`、`toolResults` 或完整 context 做判断，需要看更低层 loop 或外层 harness 的接法。
+还有一点要注意：底层 loop 的 `prepareNextTurn` 会拿到 turn context；`AgentOptions.prepareNextTurn` 这一层当前只接收 signal。也就是说，直接用 `new Agent` 时，这个 hook 更适合做不依赖上一轮细节的下一轮准备。要基于 `message`、`toolResults` 或完整 context 做判断，需要看更低层 loop 或外层 harness 的接法。
 
-core Agent 保持轻，是因为它只关心对话如何跑。存储、资源发现、settings、UI、extension runtime，都在外层包装里处理。
+core Agent 只保留基础能力，是因为它只关心对话如何跑。存储、资源发现、settings、UI、extension runtime，都在外层包装里处理。
 
-## 六、Agent 和 AgentSession 的边界
+## 六、Agent 和 AgentSession 的分工
 
-把两者放在一起看，边界比较清楚：
+把两者放在一起看，分工比较清楚：
 
 | | Agent | AgentSession |
 |---|---|---|
@@ -209,7 +211,7 @@ core Agent 保持轻，是因为它只关心对话如何跑。存储、资源发
 
 ## 七、subagent 和 multi-agent 放在哪一层
 
-理解了 Agent 的职责边界，一个自然的问题是：pi 支不支持 subagent 或 multi-agent。
+理解了 Agent 负责什么，接下来会遇到一个问题：pi 支不支持 subagent 或 multi-agent。
 
 答案要分层看。
 
@@ -217,7 +219,7 @@ core Agent 保持轻，是因为它只关心对话如何跑。存储、资源发
 
 在 coding-agent 默认工具层，内置工具是 read、bash、edit、write、grep、find、ls 这类本地工具。默认 active tools 里没有 Claude Code 那种直接派生子 agent 的 Agent/Task 工具。
 
-但仓库里有一个真实的 subagent 示例扩展：`packages/coding-agent/examples/extensions/subagent/`。这个 extension 注册 `subagent` 自定义工具。工具执行时，它会为子任务启动独立的 `pi` 子进程，让子任务有自己的上下文窗口。
+但仓库里有一个可运行的 subagent 示例扩展：`packages/coding-agent/examples/extensions/subagent/`。这个 extension 注册 `subagent` 自定义工具。工具执行时，它会为子任务启动独立的 `pi` 子进程，让子任务有自己的上下文窗口。
 
 实现链路大致是这样：extension 加载时注册 `subagent` 工具；模型调用这个工具时，工具先按 scope 发现 agent 定义，再把选中的 agent system prompt 写入临时文件，最后启动独立 `pi --mode json -p --no-session ...` 子进程。父进程读取子进程 stdout 里的 JSON 事件，收集 assistant 消息、工具结果、usage、stopReason，再把最终输出作为 `subagent` 工具结果返回给父 agent。
 
@@ -324,13 +326,13 @@ chain 的输入是一条步骤列表，例如：
 
 它还定义了自己的 agent 配置文件。agent 是 markdown 文件，frontmatter 里有 `name`、`description`，可选 `tools` 和 `model`，正文作为子进程的附加 system prompt。用户级 agent 放在 `~/.pi/agent/agents/*.md`，项目级 agent 放在 `.pi/agents/*.md`。项目级 agent 涉及仓库控制的 prompt，示例里默认不加载，需要显式 scope，并在交互模式下确认。示例自带 `scout`、`planner`、`reviewer`、`worker` 几个 agent 定义，它们是配置文件，不属于 core 里的新类。
 
-所以更准确的说法是：pi core 没有把 subagent/multi-agent 做成内置运行模型；coding-agent 默认也没有启用 agent 工具；但 extension 机制可以实现这类编排，仓库里的 subagent 示例已经证明了这一点。
+更具体地说：pi core 没有把 subagent/multi-agent 做成内置运行模型；coding-agent 默认也没有启用 agent 工具；但 extension 机制可以实现这类编排，仓库里的 subagent 示例说明这条路可行。
 
-这个分层也解释了原因。core Agent 只处理一段对话。跨 agent 调度、子进程管理、agent 定义发现、安全确认、并行结果汇总、输出截断和 UI 渲染，都需要 CLI、extension、UI 和资源体系。放在 extension 层，和 pi 现有的职责边界更一致。
+这样放也有原因。core Agent 只处理一段对话。跨 agent 调度、子进程管理、agent 定义发现、安全确认、并行结果汇总、输出截断和 UI 渲染，都需要 CLI、extension、UI 和资源体系。放在 extension 层，和 pi 现有的分工更一致。
 
-## 八、核心链路
+## 八、主链路
 
-把 Agent 的主路径压成一张文字图：
+把 Agent 的主路径整理成一张文字图：
 
 ```text
 new Agent(options)
@@ -345,7 +347,7 @@ agent.prompt(input)
   -> finishRun 清理 activeRun 和运行时状态
 ```
 
-Agent 是对话运行对象。它把一段 transcript、当前模型、工具、队列和生命周期控制收在一起，再把实际 turn loop 交给 `runAgentLoop`。理解这一层之后，前面的 loop、context、tool，后面的 AgentSession 和应用入口，就能连成一条线。
+Agent 是对话运行对象。它把一段 transcript、当前模型、工具、队列和生命周期控制收在一起。每次启动 active run 时，它再把实际 turn loop 交给 `runAgentLoop`。理解这一层之后，前面的 loop、context、tool，后面的 AgentSession 和应用入口，就能对应起来。
 
 ---
 
